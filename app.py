@@ -24,10 +24,10 @@ COMMON_COL_CONFIG = {
 
 # 🎯 [추가됨] 당월 진척도 탭 전용 컬럼 넓이 (계획/실적/진척도/GAP, 원하는 픽셀로 조절 가능)
 PROGRESS_COL_CONFIG = {
-    "계획": st.column_config.Column(width=90),
-    "실적": st.column_config.Column(width=90),
-    "진척도": st.column_config.Column(width=80),
-    "GAP": st.column_config.Column(width=90)
+    "계획": st.column_config.Column(width=110),
+    "실적": st.column_config.Column(width=110),
+    "진척도": st.column_config.Column(width=95),
+    "GAP": st.column_config.Column(width=110)
 }
 # 진척도 탭 표에 실제 적용되는 통합 설정 (공통 + 전용)
 PROG_TABLE_CONFIG = {**COMMON_COL_CONFIG, **PROGRESS_COL_CONFIG}
@@ -60,6 +60,77 @@ PRODUCT_MAPPING = {
     '101002102': '101070158', '101003128': '101070157', '101002243': '101070153',
     '101002719': '101070152', '101002244': '101070178', '101001835': '101070161'
 }
+
+# =============================================================
+# 🎯 [기간 한정 규칙] 분석 화면에만 적용. 저장 원본(CSV 히스토리)은 절대 건드리지 않음.
+#    → 아래 항목을 삭제하거나 주석 처리하면 즉시 원상복구됨.
+# =============================================================
+# [실적] (대상월, 원래코드): 통합코드 — 해당 월에 한해 원래코드의 '실적'을 통합코드로 합산
+MONTHLY_ACTUAL_MERGE = {
+    ('2026-07', '101070105'): '101004224',   # 신라면 KDH 실적 → 신라면(기존). 7월 KDH 포장재 결품 대응
+}
+# [계획] (대상월, 원래코드): (통합코드, 모드) — 해당 월에 한해 원래코드의 '계획' 처리
+#   'dedupe' : 같은 거래처에 통합코드 계획이 이미 있으면 원래코드 계획 삭제(이중 입력 제거),
+#              통합코드 계획이 없는 거래처는 원래코드 계획을 통합코드로 이관(성실 입력 사원 보호)
+#   'drop'   : 해당 월 원래코드 계획을 전부 삭제
+MONTHLY_PLAN_MERGE = {
+    ('2026-07', '101070105'): ('101004224', 'dedupe'),
+}
+# [제외] 코드: 시작월 — 해당 월부터(이후 계속) 분석에서 제외. 시작월 이전 과거 데이터/정확도는 그대로 유지
+MONTHLY_EXCLUSIONS = {
+    '101070076': '2026-07',
+}
+# [조직 통합] 영업부명/영업지점명에 나타나는 명칭을 통합 명칭으로 변경 (전 기간 · 전체 탭 적용)
+ORG_NAME_MERGE = {
+    'E-Commerce Project A': 'E-Commerce',
+}
+# [평가 제외 조직] 탭3(상세 분석)·탭4(전월 대비 개선)에서 제외할 조직명 (영업부명 또는 영업지점명 일치 시)
+#  → 탭1·2의 전체 실적 집계에는 그대로 포함됨
+EVAL_EXCLUDE_ORGS = ['NSA HQ']
+
+def apply_period_rules(df, kind):
+    """기간 한정 규칙 적용 (표시용, 원본 불변). kind: 'plan' 또는 'actual'"""
+    if df is None or df.empty or '기준월' not in df.columns or '제품코드' not in df.columns:
+        return df
+    df = df.copy()
+
+    if kind == 'actual':
+        for (m, src), dst in MONTHLY_ACTUAL_MERGE.items():
+            mask = (df['기준월'] == m) & (df['제품코드'] == src)
+            if mask.any():
+                df.loc[mask, '제품코드'] = dst
+
+    if kind == 'plan':
+        for (m, src), (dst, mode) in MONTHLY_PLAN_MERGE.items():
+            src_mask = (df['기준월'] == m) & (df['제품코드'] == src)
+            if not src_mask.any():
+                continue
+            if mode == 'drop':
+                df = df[~src_mask]
+            else:  # 'dedupe'
+                dst_customers = set(df[(df['기준월'] == m) & (df['제품코드'] == dst)]['거래처 코드'])
+                dup_mask = src_mask & df['거래처 코드'].isin(dst_customers)
+                df = df[~dup_mask]                          # 이중 입력 거래처: 원래코드 계획 삭제
+                move_mask = (df['기준월'] == m) & (df['제품코드'] == src)
+                df.loc[move_mask, '제품코드'] = dst          # 단독 입력 거래처: 통합코드로 이관
+
+    for code, start in MONTHLY_EXCLUSIONS.items():
+        df = df[~((df['제품코드'] == code) & (df['기준월'] >= start))]
+
+    # 조직 통합 (전 기간): 영업부명/영업지점명 양쪽에서 명칭 치환
+    if ORG_NAME_MERGE:
+        for src, dst in ORG_NAME_MERGE.items():
+            for col in ('영업부명', '영업지점명'):
+                if col in df.columns:
+                    df.loc[df[col].astype(str).str.strip() == src, col] = dst
+    return df
+
+# 규칙 변경 시 캐시가 자동 무효화되도록 캐시 키로 쓰는 문자열
+PERIOD_RULES_KEY = (str(sorted(MONTHLY_ACTUAL_MERGE.items())) + '|'
+                    + str(sorted(MONTHLY_PLAN_MERGE.items())) + '|'
+                    + str(sorted(MONTHLY_EXCLUSIONS.items())) + '|'
+                    + str(sorted(ORG_NAME_MERGE.items())) + '|'
+                    + str(sorted(EVAL_EXCLUDE_ORGS)))
 
 def save_uploaded_file(uploaded_file, filename):
     if uploaded_file is not None:
@@ -326,11 +397,15 @@ def apply_adjustment(adj_file):
 # 히스토리 → 분석용 데이터프레임 (기존 comparison_df와 동일 구조)
 # =============================================================
 @st.cache_data
-def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime):
+def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
     plan = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
     act = load_store(ACT_STORE, ACT_COLS, '실적수량')
     if plan.empty and act.empty:
         return None
+
+    # 🎯 기간 한정 규칙 적용 (표시용 — 저장 원본은 불변)
+    plan = apply_period_rules(plan, 'plan')
+    act = apply_period_rules(act, 'actual')
 
     plan_g = plan.groupby(['기준월'] + GROUP_COLS, as_index=False)['계획수량'].sum() if not plan.empty \
         else pd.DataFrame(columns=['기준월'] + GROUP_COLS + ['계획수량'])
@@ -353,99 +428,135 @@ def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime):
 # =============================================================
 # 사이드바: 월별 히스토리 등록 (롤링 업서트)
 # =============================================================
-st.sidebar.header("📚 월별 히스토리 데이터 (영구 저장)")
-st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 덮어쓰기(업서트)됩니다. 나머지 월은 동결 보존됩니다.")
-
-masters_ready = all(os.path.exists(p) for p in [master_path, item_master_path, exclusion_path])
-
-# 🎯 [성능] 업로드 파일 파싱 결과 캐시: 같은 파일이면 최초 1회만 엑셀을 해석.
-#    월 체크박스를 조작할 때마다 파일을 다시 읽던 문제(화면 비활성화 지연) 해결.
-@st.cache_data(show_spinner=False)
-def _cached_parse(kind, file_bytes, file_name, master_mtime):
-    bio = io.BytesIO(file_bytes)
-    master_lookup = load_master_lookup(master_mtime)
-    if kind == 'plan':
-        return process_plan_upload(bio, master_lookup)
-    if kind == 'can':
-        return process_can_upload(bio, master_lookup)
-    if kind == 'act':
-        return process_actual_upload(bio, master_lookup)
-    return None
-
-def _month_commit_widget(uploaded, kind, commit_fn, key_prefix, label):
-    """업로드 파일에서 월을 파싱해 보여주고, 선택한 월만 커밋 (파싱은 캐시됨)"""
-    if uploaded is None:
-        return
-    if not masters_ready:
-        st.sidebar.error("먼저 하단 ⚙️에 마스터 데이터 3종을 등록해주세요.")
-        return
+# =============================================================
+# 🔐 접근 제어 (배포 환경용 — 로컬에서 Secrets 미설정 시 아무 제한 없음)
+#    Streamlit Cloud 앱 → Settings → Secrets 에 아래를 필요에 따라 설정:
+#      ADMIN_PASSWORD  = "관리자비밀번호"   → 업로드/삭제 등 관리 기능 잠금 (미입력자는 읽기 전용)
+#      VIEWER_PASSWORD = "열람비밀번호"     → 이 비밀번호를 입력해야 대시보드 열람 가능 (계정 불필요)
+# =============================================================
+def _get_secret(name):
     try:
-        with st.spinner(f"{label} 파일 해석 중... (같은 파일은 최초 1회만)"):
-            parsed = _cached_parse(kind, uploaded.getvalue(), uploaded.name, file_mtime(master_path))
-    except Exception as e:
-        st.sidebar.error(f"{label} 파일 해석 실패: {e}")
-        return
-    if parsed is None or parsed.empty:
-        st.sidebar.warning(f"{label}: 인식된 데이터가 없습니다.")
-        return
-    months_found = sorted(parsed['기준월'].dropna().unique())
-    sel = st.sidebar.multiselect(f"↳ {label} 반영할 월", months_found, default=months_found, key=f"{key_prefix}_months")
-    if st.sidebar.button(f"✅ {label} 히스토리 반영", key=f"{key_prefix}_btn"):
-        if not sel:
-            st.sidebar.warning("반영할 월을 선택해주세요.")
+        return st.secrets.get(name, "")
+    except Exception:
+        return ""
+
+_ADMIN_PW = _get_secret("ADMIN_PASSWORD")
+_VIEWER_PW = _get_secret("VIEWER_PASSWORD")
+
+if _ADMIN_PW:
+    with st.sidebar.expander("🔐 관리자 로그인"):
+        _pw_in = st.text_input("비밀번호", type="password", key="admin_pw_input")
+    IS_ADMIN = (_pw_in == _ADMIN_PW)
+    if not IS_ADMIN:
+        st.sidebar.info("👀 읽기 전용 모드 — 데이터 조회만 가능합니다. (업로드/관리는 관리자 전용)")
+else:
+    IS_ADMIN = True
+
+# 열람 비밀번호 게이트: 관리자 인증자는 통과, 그 외에는 비밀번호 입력 전까지 화면 차단
+if _VIEWER_PW and not IS_ADMIN:
+    _vpw_in = st.text_input("🔑 열람 비밀번호를 입력하세요", type="password", key="viewer_pw_input")
+    if _vpw_in != _VIEWER_PW:
+        if _vpw_in:
+            st.error("비밀번호가 올바르지 않습니다.")
         else:
-            extra = commit_fn(parsed, sel)
-            st.sidebar.success(f"{label} 반영 완료: {', '.join(sel)}")
-            if extra:
-                st.sidebar.info(f"⏱️ 월 마감 등록으로 진척도 데이터 자동 정리: {', '.join(extra)}")
-            st.rerun()
+            st.info("비밀번호 입력 후 대시보드가 표시됩니다.")
+        st.stop()
 
-plan_file = st.sidebar.file_uploader("1. 수요계획 (USA,MEX)", type=['xlsx', 'csv'], key="up_plan")
-_month_commit_widget(plan_file, 'plan', lambda d, m: upsert_plan(d, m, 'USMX'), "plan", "수요계획(USA,MEX)")
+if IS_ADMIN:
+    st.sidebar.header("📚 월별 히스토리 데이터 (영구 저장)")
+    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 덮어쓰기(업서트)됩니다. 나머지 월은 동결 보존됩니다.")
 
-can_plan_file = st.sidebar.file_uploader("2. 수요계획 (CAN)", type=['xlsx', 'csv'], key="up_can")
-_month_commit_widget(can_plan_file, 'can', lambda d, m: upsert_plan(d, m, 'CAN'), "can", "수요계획(CAN)")
+    masters_ready = all(os.path.exists(p) for p in [master_path, item_master_path, exclusion_path])
 
-actual_file = st.sidebar.file_uploader("3. 출고 실적 (월 마감)", type=['xlsx', 'csv'], key="up_act")
-_month_commit_widget(actual_file, 'act', lambda d, m: upsert_actual(d, m), "act", "출고실적")
+    # 🎯 [성능] 업로드 파일 파싱 결과 캐시: 같은 파일이면 최초 1회만 엑셀을 해석.
+    #    월 체크박스를 조작할 때마다 파일을 다시 읽던 문제(화면 비활성화 지연) 해결.
+    @st.cache_data(show_spinner=False)
+    def _cached_parse(kind, file_bytes, file_name, master_mtime):
+        bio = io.BytesIO(file_bytes)
+        master_lookup = load_master_lookup(master_mtime)
+        if kind == 'plan':
+            return process_plan_upload(bio, master_lookup)
+        if kind == 'can':
+            return process_can_upload(bio, master_lookup)
+        if kind == 'act':
+            return process_actual_upload(bio, master_lookup)
+        return None
 
-adj_plan_file = st.sidebar.file_uploader("4. 영업기획 조정계획 (선택)", type=['xlsx', 'csv'], key="up_adj")
-if adj_plan_file is not None:
-    if st.sidebar.button("✅ 조정계획을 히스토리 계획에 반영", key="adj_btn"):
-        affected = apply_adjustment(adj_plan_file)
-        if affected:
-            st.sidebar.success(f"조정 반영 완료: {', '.join(affected)}")
-            st.rerun()
-        else:
-            st.sidebar.warning("조정계획 반영 실패: 형식 또는 저장된 계획을 확인해주세요.")
+    def _month_commit_widget(uploaded, kind, commit_fn, key_prefix, label):
+        """업로드 파일에서 월을 파싱해 보여주고, 선택한 월만 커밋 (파싱은 캐시됨)"""
+        if uploaded is None:
+            return
+        if not masters_ready:
+            st.sidebar.error("먼저 하단 ⚙️에 마스터 데이터 3종을 등록해주세요.")
+            return
+        try:
+            with st.spinner(f"{label} 파일 해석 중... (같은 파일은 최초 1회만)"):
+                parsed = _cached_parse(kind, uploaded.getvalue(), uploaded.name, file_mtime(master_path))
+        except Exception as e:
+            st.sidebar.error(f"{label} 파일 해석 실패: {e}")
+            return
+        if parsed is None or parsed.empty:
+            st.sidebar.warning(f"{label}: 인식된 데이터가 없습니다.")
+            return
+        months_found = sorted(parsed['기준월'].dropna().unique())
+        sel = st.sidebar.multiselect(f"↳ {label} 반영할 월", months_found, default=months_found, key=f"{key_prefix}_months")
+        if st.sidebar.button(f"✅ {label} 히스토리 반영", key=f"{key_prefix}_btn"):
+            if not sel:
+                st.sidebar.warning("반영할 월을 선택해주세요.")
+            else:
+                extra = commit_fn(parsed, sel)
+                st.sidebar.success(f"{label} 반영 완료: {', '.join(sel)}")
+                if extra:
+                    st.sidebar.info(f"⏱️ 월 마감 등록으로 진척도 데이터 자동 정리: {', '.join(extra)}")
+                st.rerun()
+
+    plan_file = st.sidebar.file_uploader("1. 수요계획 (USA,MEX)", type=['xlsx', 'csv'], key="up_plan")
+    _month_commit_widget(plan_file, 'plan', lambda d, m: upsert_plan(d, m, 'USMX'), "plan", "수요계획(USA,MEX)")
+
+    can_plan_file = st.sidebar.file_uploader("2. 수요계획 (CAN)", type=['xlsx', 'csv'], key="up_can")
+    _month_commit_widget(can_plan_file, 'can', lambda d, m: upsert_plan(d, m, 'CAN'), "can", "수요계획(CAN)")
+
+    actual_file = st.sidebar.file_uploader("3. 출고 실적 (월 마감)", type=['xlsx', 'csv'], key="up_act")
+    _month_commit_widget(actual_file, 'act', lambda d, m: upsert_actual(d, m), "act", "출고실적")
+
+    adj_plan_file = st.sidebar.file_uploader("4. 영업기획 조정계획 (선택)", type=['xlsx', 'csv'], key="up_adj")
+    if adj_plan_file is not None:
+        if st.sidebar.button("✅ 조정계획을 히스토리 계획에 반영", key="adj_btn"):
+            affected = apply_adjustment(adj_plan_file)
+            if affected:
+                st.sidebar.success(f"조정 반영 완료: {', '.join(affected)}")
+                st.rerun()
+            else:
+                st.sidebar.warning("조정계획 반영 실패: 형식 또는 저장된 계획을 확인해주세요.")
 
 # --- 당월 진척도 데이터 ---
-st.sidebar.divider()
-st.sidebar.header("⏱️ 당월 진척도 데이터")
-st.sidebar.caption("'마감 여부' 컬럼이 포함된 오더 데이터. 업로드 시 전체 교체(스냅샷)되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제됩니다.")
+if IS_ADMIN:
+    st.sidebar.divider()
+    st.sidebar.header("⏱️ 당월 진척도 데이터")
+    st.sidebar.caption("'마감 여부' 컬럼이 포함된 오더 데이터. 업로드 시 전체 교체(스냅샷)되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제됩니다.")
 
-prog_target = st.sidebar.text_input("진척도 대상월 (YYYY-MM)", value=pd.Timestamp.today().strftime('%Y-%m'), key="prog_month")
-prog_file = st.sidebar.file_uploader("5. 당월 오더/출고 데이터", type=['xlsx', 'csv'], key="up_prog")
-if prog_file is not None:
-    if st.sidebar.button("✅ 진척도 데이터 반영 (전체 교체)", key="prog_btn"):
-        tm = parse_month(prog_target)
-        if not (isinstance(tm, str) and re.fullmatch(r'\d{4}-\d{2}', tm)):
-            st.sidebar.error("대상월 형식이 올바르지 않습니다. 예: 2026-07")
-        elif not masters_ready:
-            st.sidebar.error("먼저 마스터 데이터 3종을 등록해주세요.")
-        else:
-            master_lookup = load_master_lookup(file_mtime(master_path))
-            parsed = process_progress_upload(prog_file, master_lookup, tm)
-            if parsed is None:
-                st.sidebar.error("'마감 여부' 컬럼을 찾을 수 없습니다.")
+    prog_target = st.sidebar.text_input("진척도 대상월 (YYYY-MM)", value=pd.Timestamp.today().strftime('%Y-%m'), key="prog_month")
+    prog_file = st.sidebar.file_uploader("5. 당월 오더/출고 데이터", type=['xlsx', 'csv'], key="up_prog")
+    if prog_file is not None:
+        if st.sidebar.button("✅ 진척도 데이터 반영 (전체 교체)", key="prog_btn"):
+            tm = parse_month(prog_target)
+            if not (isinstance(tm, str) and re.fullmatch(r'\d{4}-\d{2}', tm)):
+                st.sidebar.error("대상월 형식이 올바르지 않습니다. 예: 2026-07")
+            elif not masters_ready:
+                st.sidebar.error("먼저 마스터 데이터 3종을 등록해주세요.")
             else:
-                act_months_now = set(load_store(ACT_STORE, ACT_COLS, '실적수량')['기준월'].unique())
-                if tm in act_months_now:
-                    st.sidebar.warning(f"{tm}은 이미 월 마감 실적이 등록된 월입니다. 진척도 대상월을 확인해주세요.")
+                master_lookup = load_master_lookup(file_mtime(master_path))
+                parsed = process_progress_upload(prog_file, master_lookup, tm)
+                if parsed is None:
+                    st.sidebar.error("'마감 여부' 컬럼을 찾을 수 없습니다.")
                 else:
-                    save_store(parsed, PROG_STORE)
-                    st.sidebar.success(f"진척도 데이터 반영 완료 (대상월: {tm})")
-                    st.rerun()
+                    act_months_now = set(load_store(ACT_STORE, ACT_COLS, '실적수량')['기준월'].unique())
+                    if tm in act_months_now:
+                        st.sidebar.warning(f"{tm}은 이미 월 마감 실적이 등록된 월입니다. 진척도 대상월을 확인해주세요.")
+                    else:
+                        save_store(parsed, PROG_STORE)
+                        st.sidebar.success(f"진척도 데이터 반영 완료 (대상월: {tm})")
+                        st.rerun()
 
 # --- 저장 현황 및 관리 ---
 st.sidebar.divider()
@@ -463,44 +574,46 @@ st.sidebar.caption(f"계획(CAN): {', '.join(can_months) if can_months else '없
 st.sidebar.caption(f"실적 보유: {', '.join(act_months) if act_months else '없음'}")
 st.sidebar.caption(f"진척도 보유: {', '.join(prog_months) if prog_months else '없음'}")
 
-with st.sidebar.expander("🧹 특정 월 삭제 / 전체 초기화"):
-    del_target = st.selectbox("대상 저장소", ["계획", "실적", "진척도"], key="del_store")
-    _opts = {'계획': plan_months, '실적': act_months, '진척도': prog_months}[del_target]
-    if _opts:
-        del_month_sel = st.selectbox("삭제할 월", _opts, key="del_month")
-        if st.button("해당 월 삭제", key="del_btn"):
-            _map = {'계획': (PLAN_STORE, PLAN_COLS, '계획수량'),
-                    '실적': (ACT_STORE, ACT_COLS, '실적수량'),
-                    '진척도': (PROG_STORE, PROG_COLS, '실적수량')}
-            delete_month(*_map[del_target], del_month_sel)
+if IS_ADMIN:
+    with st.sidebar.expander("🧹 특정 월 삭제 / 전체 초기화"):
+        del_target = st.selectbox("대상 저장소", ["계획", "실적", "진척도"], key="del_store")
+        _opts = {'계획': plan_months, '실적': act_months, '진척도': prog_months}[del_target]
+        if _opts:
+            del_month_sel = st.selectbox("삭제할 월", _opts, key="del_month")
+            if st.button("해당 월 삭제", key="del_btn"):
+                _map = {'계획': (PLAN_STORE, PLAN_COLS, '계획수량'),
+                        '실적': (ACT_STORE, ACT_COLS, '실적수량'),
+                        '진척도': (PROG_STORE, PROG_COLS, '실적수량')}
+                delete_month(*_map[del_target], del_month_sel)
+                st.rerun()
+        else:
+            st.caption("저장된 월이 없습니다.")
+        confirm_reset = st.checkbox("전체 초기화에 동의합니다 (복구 불가)", key="reset_ok")
+        if st.button("🚨 히스토리 전체 초기화", key="reset_btn") and confirm_reset:
+            for p in [PLAN_STORE, ACT_STORE, PROG_STORE]:
+                if os.path.exists(p):
+                    os.remove(p)
             st.rerun()
-    else:
-        st.caption("저장된 월이 없습니다.")
-    confirm_reset = st.checkbox("전체 초기화에 동의합니다 (복구 불가)", key="reset_ok")
-    if st.button("🚨 히스토리 전체 초기화", key="reset_btn") and confirm_reset:
-        for p in [PLAN_STORE, ACT_STORE, PROG_STORE]:
-            if os.path.exists(p):
-                os.remove(p)
-        st.rerun()
 
 # --- 마스터 데이터 관리 (기존과 동일) ---
 st.sidebar.divider()
-st.sidebar.header("⚙️ 마스터 데이터 관리")
-st.sidebar.caption("최초 1회 업로드 시 시스템에 저장됨. 내용 갱신 필요 시 재업로드.")
+if IS_ADMIN:
+    st.sidebar.header("⚙️ 마스터 데이터 관리")
+    st.sidebar.caption("최초 1회 업로드 시 시스템에 저장됨. 내용 갱신 필요 시 재업로드.")
 
-master_upload = st.sidebar.file_uploader("🔄 영업마스터 갱신 (선택)", type=['xlsx', 'csv'])
-item_master_upload = st.sidebar.file_uploader("🔄 품목마스터 갱신 (선택)", type=['xlsx', 'csv'])
-exclusion_upload = st.sidebar.file_uploader("🔄 제외 품목 리스트 갱신 (선택)", type=['xlsx', 'csv'])
+    master_upload = st.sidebar.file_uploader("🔄 영업마스터 갱신 (선택)", type=['xlsx', 'csv'])
+    item_master_upload = st.sidebar.file_uploader("🔄 품목마스터 갱신 (선택)", type=['xlsx', 'csv'])
+    exclusion_upload = st.sidebar.file_uploader("🔄 제외 품목 리스트 갱신 (선택)", type=['xlsx', 'csv'])
 
-if master_upload:
-    save_uploaded_file(master_upload, "master.xlsx")
-    st.sidebar.success("영업마스터가 시스템에 저장(갱신)되었습니다!")
-if item_master_upload:
-    save_uploaded_file(item_master_upload, "item_master.xlsx")
-    st.sidebar.success("품목마스터가 시스템에 저장(갱신)되었습니다!")
-if exclusion_upload:
-    save_uploaded_file(exclusion_upload, "exclusion.xlsx")
-    st.sidebar.success("제외 품목 리스트가 시스템에 저장(갱신)되었습니다!")
+    if master_upload:
+        save_uploaded_file(master_upload, "master.xlsx")
+        st.sidebar.success("영업마스터가 시스템에 저장(갱신)되었습니다!")
+    if item_master_upload:
+        save_uploaded_file(item_master_upload, "item_master.xlsx")
+        st.sidebar.success("품목마스터가 시스템에 저장(갱신)되었습니다!")
+    if exclusion_upload:
+        save_uploaded_file(exclusion_upload, "exclusion.xlsx")
+        st.sidebar.success("제외 품목 리스트가 시스템에 저장(갱신)되었습니다!")
 
 master_ready = os.path.exists(master_path)
 item_master_ready = os.path.exists(item_master_path)
@@ -858,7 +971,111 @@ def apply_product_filters(df, kw_input, acc_threshold, months_list):
 
 
 # =============================================================
-# 🎯 [추가됨] 탭4: 당월 진척도 렌더링
+# 🎯 [추가됨] 탭4: 전월 대비 정확도/GAP 개선 (영업사원별)
+# =============================================================
+def render_improvement_tab(df, available_months):
+    if df is None or df.empty or len(available_months) < 2:
+        return st.info("비교하려면 히스토리에 2개월 이상의 데이터가 필요합니다.")
+
+    def _prev(m):
+        try:
+            return (pd.Period(m, freq='M') - 1).strftime('%Y-%m')
+        except Exception:
+            return None
+
+    month_set = set(available_months)
+    cands = [m for m in available_months if _prev(m) in month_set]
+    default_idx = available_months.index(cands[-1]) if cands else len(available_months) - 1
+    month = st.selectbox("📅 평가 기준월 (이 달과 바로 전월을 비교)", available_months, index=default_idx, key="imp_month")
+    pm = _prev(month)
+    if pm not in month_set:
+        return st.warning(f"전월({pm}) 데이터가 히스토리에 없어 비교할 수 없습니다.")
+
+    st.caption(f"💡 정확도 = 사원(지점)별 품목별 정확도의 평균 / GAP = 총 계획 - 총 실적. "
+               f"정확도 개선 = {month} 정확도 - {pm} 정확도 (%p), GAP 개선 = {pm} GAP - {month} GAP. "
+               "정렬: 지점은 기준월 정확도 내림차순, 지점 내 사원은 정확도 개선 내림차순. "
+               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. "
+               "하단 전체 평균은 사원 기준(사원 1명=1표)과 지점 기준(지점 소계의 평균, 지점 1개=1표)을 함께 표시합니다.")
+
+    flat, mp = build_flat_month_table(df, ['영업지점명', '영업사원명'], [pm, month], include_qty=False)
+    if flat is None or len(mp) < 2:
+        return st.warning("두 달 모두 데이터가 있어야 비교할 수 있습니다.")
+    br, _ = build_flat_month_table(df, ['영업지점명'], [pm, month], include_qty=False)
+
+    acc_prev, acc_cur = f"{pm} 정확도", f"{month} 정확도"
+    gap_prev, gap_cur = f"{pm} GAP", f"{month} GAP"
+
+    for t in (flat, br):
+        t['정확도 개선'] = t[acc_cur] - t[acc_prev]
+        t['GAP 개선'] = t[gap_prev] - t[gap_cur]
+
+    # 두 달 모두 유효 데이터가 없는 유령 행 제거
+    ghost = flat[[acc_prev, acc_cur]].isna().all(axis=1) & (flat[[gap_prev, gap_cur]].fillna(0).abs().sum(axis=1) == 0)
+    flat = flat[~ghost]
+    if flat.empty:
+        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
+
+    value_cols = [acc_prev, acc_cur, '정확도 개선', gap_prev, gap_cur, 'GAP 개선']
+    label_cols = ['영업지점명', '영업사원명']
+
+    rows, subtotal_pos, used_branches = [], [], []
+    br_sorted = br.sort_values(acc_cur, ascending=False, na_position='last')  # 지점: 기준월 정확도 내림차순
+    for _, brow in br_sorted.iterrows():
+        b = brow['영업지점명']
+        ppl = flat[flat['영업지점명'] == b].sort_values('정확도 개선', ascending=False, na_position='last')
+        if ppl.empty:
+            continue
+        used_branches.append(b)
+        for _, prow in ppl.iterrows():
+            rows.append([b, prow['영업사원명']] + [prow[c] for c in value_cols])
+        rows.append([b, '📍 지점 소계'] + [brow[c] for c in value_cols])
+        subtotal_pos.append(len(rows) - 1)
+
+    if not rows:
+        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
+
+    result = pd.DataFrame(rows, columns=label_cols + value_cols)
+
+    fmt = build_format_dict(value_cols)
+    fmt['정확도 개선'] = lambda x: '-' if pd.isna(x) else f"{x*100:+.1f}%p"
+    fmt['GAP 개선'] = lambda x: '-' if pd.isna(x) else f"{int(x):+,}"
+
+    def highlight(row):
+        if row.name in subtotal_pos:
+            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
+        v = row['정확도 개선']
+        if pd.notna(v) and v > 0:
+            return ['background-color: #e6f4ea; color: #000000'] * len(row)
+        if pd.notna(v) and v < 0:
+            return ['background-color: #fbe9e9; color: #000000'] * len(row)
+        return [''] * len(row)
+
+    styled = result.style.format(fmt).apply(highlight, axis=1)
+    h = min(560, 37 * (len(result) + 1) + 12)
+    st.dataframe(styled, width='content', hide_index=True, height=h, column_config=COMMON_COL_CONFIG)
+
+    # 전체 평균: 두 가지 기준을 모두 표시
+    # 🎯 [수정됨] ① 사원 기준 = 표의 사원 행 전체 평균 (사원 1명 = 1표)
+    #            ② 지점 기준 = 표에 표시된 지점 소계들의 평균 (지점 1개 = 1표, 탭2 전체 평균과 동일·손검산 일치)
+    #    GAP은 두 기준 모두 동일한 전체 합계. 개선값은 '표시된 전월·당월 값의 차이'로 계산해 검산이 항상 일치.
+    br_used = br[br['영업지점명'].isin(used_branches)]
+    p_acc_prev, p_acc_cur = flat[acc_prev].mean(), flat[acc_cur].mean()
+    b_acc_prev, b_acc_cur = br_used[acc_prev].mean(), br_used[acc_cur].mean()
+    tot_gap_prev, tot_gap_cur = br_used[gap_prev].sum(), br_used[gap_cur].sum()
+    total_df = pd.DataFrame([
+        ['전체 평균 (사원 기준)', '', p_acc_prev, p_acc_cur, p_acc_cur - p_acc_prev,
+         tot_gap_prev, tot_gap_cur, tot_gap_prev - tot_gap_cur],
+        ['전체 평균 (지점 기준)', '', b_acc_prev, b_acc_cur, b_acc_cur - b_acc_prev,
+         tot_gap_prev, tot_gap_cur, tot_gap_prev - tot_gap_cur],
+    ], columns=label_cols + value_cols)
+    styled_total = total_df.style.format(fmt).apply(
+        lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
+    )
+    st.dataframe(styled_total, width='content', hide_index=True, column_config=COMMON_COL_CONFIG)
+
+
+# =============================================================
+# 🎯 [추가됨] 탭5: 당월 진척도 렌더링
 # =============================================================
 def render_progress_tab():
     prog = load_store(PROG_STORE, PROG_COLS, '실적수량')
@@ -876,7 +1093,10 @@ def render_progress_tab():
 
     p_months = sorted(prog['기준월'].unique())
     month = st.selectbox("📅 진척도 대상월", p_months, index=len(p_months) - 1)
-    prog_m = prog[prog['기준월'] == month]
+    # 🎯 기간 한정 규칙 적용 (KDH 한시 통합, 시작월부터 제외 — 저장 원본은 불변)
+    prog_m = apply_period_rules(prog[prog['기준월'] == month], 'actual')
+    if prog_m.empty:
+        return st.info("기간 한정 규칙 적용 후 남은 진척도 데이터가 없습니다.")
 
     # 마감 여부 선택 (기본: 해당월 출고 확정만)
     statuses = sorted(prog_m['마감여부'].unique())
@@ -894,9 +1114,10 @@ def render_progress_tab():
 
     prog_sel = prog_m[prog_m['마감여부'].isin(sel_status)].groupby(GROUP_COLS, as_index=False)['실적수량'].sum()
 
-    # 계획: 히스토리 저장소의 해당월 계획을 자동 사용
+    # 계획: 히스토리 저장소의 해당월 계획을 자동 사용 (기간 한정 규칙 동일 적용)
     plan_store = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
-    plan_m = plan_store[plan_store['기준월'] == month].groupby(GROUP_COLS, as_index=False)['계획수량'].sum()
+    plan_rows = apply_period_rules(plan_store[plan_store['기준월'] == month], 'plan')
+    plan_m = plan_rows.groupby(GROUP_COLS, as_index=False)['계획수량'].sum()
     if plan_m.empty:
         st.warning(f"⚠️ 히스토리에 {month} 계획이 없습니다. 좌측 📚 영역에서 해당월 계획을 먼저 반영해주세요. (아래는 실적만 표시됩니다)")
 
@@ -1047,13 +1268,15 @@ def render_progress_tab():
 # =============================================================
 if master_ready and item_master_ready and exclusion_ready:
     raw_df = build_history_df(file_mtime(PLAN_STORE), file_mtime(ACT_STORE),
-                              file_mtime(item_master_path), file_mtime(exclusion_path))
+                              file_mtime(item_master_path), file_mtime(exclusion_path),
+                              PERIOD_RULES_KEY)
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 1. 제품별 실적 뷰",
         "🏢 2. 영업조직별 실적 뷰",
         "🛠️ 3. 상세 분석 (조직/사원별 딥다이브)",
-        "⏱️ 4. 당월 진척도"
+        "📈 4. 전월 대비 개선 (사원별)",
+        "⏱️ 5. 당월 진척도"
     ])
 
     if raw_df is None or raw_df.empty:
@@ -1062,6 +1285,8 @@ if master_ready and item_master_ready and exclusion_ready:
         with tab2:
             st.info("히스토리 데이터가 없습니다.")
         with tab3:
+            st.info("히스토리 데이터가 없습니다.")
+        with tab4:
             st.info("히스토리 데이터가 없습니다.")
     else:
         st.subheader("🔍 통합 데이터 필터")
@@ -1109,11 +1334,18 @@ if master_ready and item_master_ready and exclusion_ready:
 
         with tab3:
             st.markdown("##### 영업부/지점/사원을 좁혀가며, 문제 품목과 담당자를 딥다이브 하세요.")
+            # 🎯 [추가됨] 평가 제외 조직(EVAL_EXCLUDE_ORGS)은 상세 분석에서 제외
+            t3_base = filtered_df[
+                (~filtered_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
+                (~filtered_df['영업지점명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS))
+            ]
+            if EVAL_EXCLUDE_ORGS:
+                st.caption(f"※ 평가 제외 조직: {', '.join(EVAL_EXCLUDE_ORGS)} (탭1·2 전체 집계에는 포함)")
             f_col1, f_col2, f_col3 = st.columns(3)
             with f_col1:
-                dept_opts = ['(전체)'] + sorted(filtered_df['영업부명'].unique())
+                dept_opts = ['(전체)'] + sorted(t3_base['영업부명'].unique())
                 t3_dept = st.selectbox("▶ 영업부 선택", dept_opts)
-            dept_df = filtered_df if t3_dept == '(전체)' else filtered_df[filtered_df['영업부명'] == t3_dept]
+            dept_df = t3_base if t3_dept == '(전체)' else t3_base[t3_base['영업부명'] == t3_dept]
             with f_col2:
                 branch_opts = ['(전체)'] + sorted(dept_df['영업지점명'].unique())
                 t3_branch = st.selectbox("▶ 영업지점 선택", branch_opts)
@@ -1142,7 +1374,7 @@ if master_ready and item_master_ready and exclusion_ready:
 
             st.markdown("---")
             st.markdown("##### 👥 지점별 · 영업사원별 정확도/GAP 요약")
-            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준이며, 사원 드롭다운과 무관하게 선택 지점 내 전체 사원을 비교합니다. 품목 필터를 걸면 '그 품목들에 대해 누가 문제인지' 바로 보입니다. 정렬: 정확도 낮은 순.")
+            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준이며, 사원 드롭다운과 무관하게 선택 지점 내 전체 사원을 비교합니다. 품목 필터를 걸면 '그 품목들에 대해 누가 문제인지' 바로 보입니다. 정렬: 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균(사원 1명=1표).")
             render_person_summary(summary_base, selected_months)
 
             st.markdown("---")
@@ -1152,12 +1384,26 @@ if master_ready and item_master_ready and exclusion_ready:
                 ['제품코드', '제품명', '영업부명', '영업지점명', '영업사원명', '국가'],
                 default=['제품코드', '제품명', '영업사원명']
             )
-            st.caption("💡 정확도 = 해당 행의 품목별 정확도 평균 / 📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). 정렬은 기간 평균 정확도 오름차순(문제 품목·행이 맨 위)입니다.")
+            st.caption("💡 정확도 = 해당 행의 품목별 정확도 평균 / 📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). 정렬은 기간 평균 정확도 오름차순(문제 품목·행이 맨 위)입니다. 하단 전체 평균 = 표시된 세부 행들의 평균(세부 행 1개=1표)이라, 행 구성에 따라 위 요약표의 사원 기준 평균과 다를 수 있습니다.")
 
             if dynamic_rows:
                 render_detail_table(t3_filtered, dynamic_rows, selected_months)
 
-    with tab4:
+        with tab4:
+            st.markdown("##### 전월 대비 정확도/GAP 개선 (영업사원별)")
+            # 국가/제외 품목 필터는 적용하되, 월은 상단 슬라이더와 무관하게 자체 선택
+            # 🎯 [추가됨] 평가 제외 조직(EVAL_EXCLUDE_ORGS)은 개선 평가에서 제외
+            imp_base = raw_df[
+                (raw_df['국가'].isin(sel_countries)) &
+                (~raw_df['제품코드'].isin(exclude_codes)) &
+                (~raw_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
+                (~raw_df['영업지점명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS))
+            ]
+            if EVAL_EXCLUDE_ORGS:
+                st.caption(f"※ 평가 제외 조직: {', '.join(EVAL_EXCLUDE_ORGS)}")
+            render_improvement_tab(imp_base, available_months)
+
+    with tab5:
         st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검용)")
         render_progress_tab()
 
