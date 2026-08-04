@@ -453,14 +453,17 @@ else:
     IS_ADMIN = True
 
 # 열람 비밀번호 게이트: 관리자 인증자는 통과, 그 외에는 비밀번호 입력 전까지 화면 차단
-if _VIEWER_PW and not IS_ADMIN:
+# 🎯 인증에 성공하면 세션에 기록해 입력칸을 화면에서 제거. 창을 닫았다 새로 열면 다시 요구됨.
+if _VIEWER_PW and not IS_ADMIN and not st.session_state.get("viewer_ok", False):
     _vpw_in = st.text_input("🔑 열람 비밀번호를 입력하세요", type="password", key="viewer_pw_input")
-    if _vpw_in != _VIEWER_PW:
-        if _vpw_in:
-            st.error("비밀번호가 올바르지 않습니다.")
-        else:
-            st.info("비밀번호 입력 후 대시보드가 표시됩니다.")
-        st.stop()
+    if _vpw_in == _VIEWER_PW:
+        st.session_state["viewer_ok"] = True
+        st.rerun()
+    if _vpw_in:
+        st.error("비밀번호가 올바르지 않습니다.")
+    else:
+        st.info("비밀번호 입력 후 대시보드가 표시됩니다.")
+    st.stop()
 
 if IS_ADMIN:
     st.sidebar.header("📚 월별 히스토리 데이터 (영구 저장)")
