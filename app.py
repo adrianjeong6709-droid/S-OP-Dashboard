@@ -13,7 +13,7 @@ except ImportError:
     PLOTLY_OK = False
 
 st.set_page_config(page_title="S&OP Dashboard", layout="wide")
-st.title("S&OP 수요계획 대비 실적 대시보드 (고도화 뷰)")
+st.title("S&OP 대시보드 (고도화 뷰)")
 
 # 🎯 공통 컬럼 넓이 설정 (원하는 픽셀 크기로 조절 가능)
 COMMON_COL_CONFIG = {
@@ -448,7 +448,7 @@ if _ADMIN_PW:
         _pw_in = st.text_input("비밀번호", type="password", key="admin_pw_input")
     IS_ADMIN = (_pw_in == _ADMIN_PW)
     if not IS_ADMIN:
-        st.sidebar.info("👀 읽기 전용 모드 — 데이터 조회만 가능합니다. (업로드/관리는 관리자 전용)")
+        st.sidebar.info("👀 조회 전용 모드. (업로드/관리는 관리자 전용)")
 else:
     IS_ADMIN = True
 
@@ -467,7 +467,7 @@ if _VIEWER_PW and not IS_ADMIN and not st.session_state.get("viewer_ok", False):
 
 if IS_ADMIN:
     st.sidebar.header("📚 월별 히스토리 데이터 (영구 저장)")
-    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 덮어쓰기(업서트)됩니다. 나머지 월은 동결 보존됩니다.")
+    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 덮어쓰기(업서트). 나머지 월은 동결 보존")
 
     masters_ready = all(os.path.exists(p) for p in [master_path, item_master_path, exclusion_path])
 
@@ -536,7 +536,7 @@ if IS_ADMIN:
 if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("⏱️ 당월 진척도 데이터")
-    st.sidebar.caption("'마감 여부' 컬럼이 포함된 오더 데이터. 업로드 시 전체 교체(스냅샷)되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제됩니다.")
+    st.sidebar.caption("'마감 여부' 컬럼이 포함된 오더 데이터. 업로드 시 전체 교체(스냅샷)되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제")
 
     prog_target = st.sidebar.text_input("진척도 대상월 (YYYY-MM)", value=pd.Timestamp.today().strftime('%Y-%m'), key="prog_month")
     prog_file = st.sidebar.file_uploader("5. 당월 오더/출고 데이터", type=['xlsx', 'csv'], key="up_prog")
@@ -997,8 +997,7 @@ def render_improvement_tab(df, available_months):
     st.caption(f"💡 정확도 = 사원(지점)별 품목별 정확도의 평균 / GAP = 총 계획 - 총 실적. "
                f"정확도 개선 = {month} 정확도 - {pm} 정확도 (%p), GAP 개선 = {pm} GAP - {month} GAP. "
                "정렬: 지점은 기준월 정확도 내림차순, 지점 내 사원은 정확도 개선 내림차순. "
-               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. "
-               "하단 전체 평균은 사원 기준(사원 1명=1표)과 지점 기준(지점 소계의 평균, 지점 1개=1표)을 함께 표시합니다.")
+               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. ")
 
     flat, mp = build_flat_month_table(df, ['영업지점명', '영업사원명'], [pm, month], include_qty=False)
     if flat is None or len(mp) < 2:
@@ -1111,7 +1110,7 @@ def render_progress_tab():
     if not default_sel:
         default_sel = [s for s in statuses if '확정' in s] or statuses
     sel_status = st.multiselect("✅ 집계에 포함할 '마감 여부' 상태", statuses, default=default_sel)
-    st.caption("💡 기본값(해당월 출고 확정)은 확정 오더 기준 실적입니다. '출고 미확정' 등을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량이 됩니다.")
+    st.caption("💡 기본값은 출고 확정 오더 기준 실적. '출고 미확정' 등을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량이 됩니다.")
     if not sel_status:
         return st.warning("집계할 마감 여부 상태를 1개 이상 선택해주세요.")
 
@@ -1232,7 +1231,7 @@ def render_progress_tab():
     st.markdown("---")
     st.markdown("##### ③ 선택 품목 기준 지점 · 영업사원별 GAP (GAP 큰 순)")
     st.caption("💡 위 ②에서 지정한 진척도 조건에 걸린 품목들만 집계한 GAP입니다. GAP = 계획 - 실적 (양수 = 미달). "
-               "②에 리스트업된 제품 중 진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외했습니다.")
+               "②에 리스트업된 제품 중 진척도가 무한대(∞)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외.")
     gap_df = merged[merged['제품코드'].isin(low_codes)]  # 🎯 ∞ 품목 제외 (유한 진척도 품목만)
     if gap_df.empty:
         return st.info("GAP 집계 대상 품목이 없습니다. (∞ 품목 제외 기준)")
@@ -1277,8 +1276,8 @@ if master_ready and item_master_ready and exclusion_ready:
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 1. 제품별 실적 뷰",
         "🏢 2. 영업조직별 실적 뷰",
-        "🛠️ 3. 상세 분석 (조직/사원별 딥다이브)",
-        "📈 4. 전월 대비 개선 (사원별)",
+        "🛠️ 3. 상세 분석",
+        "📈 4. 전월 대비 개선",
         "⏱️ 5. 당월 진척도"
     ])
 
@@ -1297,7 +1296,7 @@ if master_ready and item_master_ready and exclusion_ready:
         available_months = sorted([m for m in raw_df['기준월'].unique() if pd.notna(m) and str(m).strip() != ''])
         if len(available_months) >= 2:
             start_month, end_month = st.select_slider(
-                "📅 조회할 월(Month) 범위를 지정하세요",
+                "📅 조회할 월(Month) 범위 지정",
                 options=available_months,
                 value=(available_months[0], available_months[-1])
             )
@@ -1316,7 +1315,7 @@ if master_ready and item_master_ready and exclusion_ready:
             sel_countries = st.multiselect("🌍 국가 포함", all_countries, default=all_countries)
         with col2:
             all_codes = sorted(raw_df['제품코드'].unique())
-            exclude_codes = st.multiselect("❌ 제외할 제품코드/품목 (화면 임시 제외)", all_codes, default=[])
+            exclude_codes = st.multiselect("❌ 제외할 제품코드/품목 (임시 제외)", all_codes, default=[])
 
         filtered_df = raw_df[
             (raw_df['기준월'].isin(selected_months)) &
@@ -1332,11 +1331,11 @@ if master_ready and item_master_ready and exclusion_ready:
 
         with tab2:
             st.markdown("##### 지점별 수요계획 대비 판매실적")
-            st.caption("💡 정확도 = 각 지점이 담당한 품목별 정확도의 평균 (GAP은 총 계획량 - 총 실적량 기준)")
+            st.caption("💡 정확도 = 각 지점별 품목별 정확도의 평균 (GAP은 총 계획량 - 총 실적량 기준)")
             create_styled_pivot(filtered_df, ['영업부명', '영업지점명'], selected_months, acc_mode='item_avg')
 
         with tab3:
-            st.markdown("##### 영업부/지점/사원을 좁혀가며, 문제 품목과 담당자를 딥다이브 하세요.")
+            st.markdown("##### 영업부/지점/사원을 좁혀가며, 이슈 품목 딥다이브")
             # 🎯 [추가됨] 평가 제외 조직(EVAL_EXCLUDE_ORGS)은 상세 분석에서 제외
             t3_base = filtered_df[
                 (~filtered_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
@@ -1368,7 +1367,7 @@ if master_ready and item_master_ready and exclusion_ready:
                 )
             with d_col2:
                 acc_threshold = st.number_input(
-                    "정확도 하위 필터 (기간 평균 %가 이 값 미만인 품목만, 100=전체)",
+                    "정확도 필터 (기간 평균 %가 특정값 미만인 품목만 조회)",
                     min_value=0, max_value=100, value=100, step=5
                 )
 
@@ -1377,23 +1376,23 @@ if master_ready and item_master_ready and exclusion_ready:
 
             st.markdown("---")
             st.markdown("##### 👥 지점별 · 영업사원별 정확도/GAP 요약")
-            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준이며, 사원 드롭다운과 무관하게 선택 지점 내 전체 사원을 비교합니다. 품목 필터를 걸면 '그 품목들에 대해 누가 문제인지' 바로 보입니다. 정렬: 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균(사원 1명=1표).")
+            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준이며, 사원 드롭다운과 무관하게 선택 지점 내 전체 사원 조회. 품목 필터를 걸면 '그 품목들에 대한' 조회. 정렬: 정확도 낮은 순.")
             render_person_summary(summary_base, selected_months)
 
             st.markdown("---")
             st.markdown("##### 📋 상세 테이블 (제품 소계 + 정확도 오름차순)")
             dynamic_rows = st.multiselect(
-                "📌 행(Row)으로 볼 항목을 배치하세요. (제품코드/제품명 포함 시 제품 소계가 자동 표시됩니다)",
+                "📌 행(Row)으로 볼 항목 배치. (제품코드/제품명 포함 시 제품 소계 자동 표시)",
                 ['제품코드', '제품명', '영업부명', '영업지점명', '영업사원명', '국가'],
                 default=['제품코드', '제품명', '영업사원명']
             )
-            st.caption("💡 정확도 = 해당 행의 품목별 정확도 평균 / 📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). 정렬은 기간 평균 정확도 오름차순(문제 품목·행이 맨 위)입니다. 하단 전체 평균 = 표시된 세부 행들의 평균(세부 행 1개=1표)이라, 행 구성에 따라 위 요약표의 사원 기준 평균과 다를 수 있습니다.")
+            st.caption("💡 정확도 = 해당 행의 품목별 정확도 평균 / 📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). 정렬은 기간 평균 정확도 오름차순(이슈 품목·행이 맨 위). 하단 전체 평균 = 표시된 세부 행들의 평균이라, 행 구성에 따라 위 요약표의 사원 기준 평균과 다를 수 있음")
 
             if dynamic_rows:
                 render_detail_table(t3_filtered, dynamic_rows, selected_months)
 
         with tab4:
-            st.markdown("##### 전월 대비 정확도/GAP 개선 (영업사원별)")
+            st.markdown("##### 전월 대비 정확도/GAP 개선 (사원별)")
             # 국가/제외 품목 필터는 적용하되, 월은 상단 슬라이더와 무관하게 자체 선택
             # 🎯 [추가됨] 평가 제외 조직(EVAL_EXCLUDE_ORGS)은 개선 평가에서 제외
             imp_base = raw_df[
