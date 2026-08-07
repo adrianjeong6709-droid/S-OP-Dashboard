@@ -1,0 +1,121 @@
+﻿영업부코드,영업부명,영업지점코드,영업지점명,기준월,목표금액
+5200,Asian,521,West,2026-01,3826000
+5200,Asian,521,West,2026-02,3832000
+5200,Asian,521,West,2026-03,3993000
+5200,Asian,521,West,2026-04,3852000
+5200,Asian,521,West,2026-05,3872000
+5200,Asian,521,West,2026-06,3903000
+5200,Asian,521,West,2026-07,3544000
+5200,Asian,521,West,2026-08,3383000
+5200,Asian,521,West,2026-09,3703000
+5200,Asian,521,West,2026-10,3813000
+5200,Asian,521,West,2026-11,3763000
+5200,Asian,521,West,2026-12,3714000
+5200,Asian,522,East,2026-01,5269000
+5200,Asian,522,East,2026-02,4836000
+5200,Asian,522,East,2026-03,5055000
+5200,Asian,522,East,2026-04,5096000
+5200,Asian,522,East,2026-05,5125000
+5200,Asian,522,East,2026-06,5007000
+5200,Asian,522,East,2026-07,4673000
+5200,Asian,522,East,2026-08,4614000
+5200,Asian,522,East,2026-09,5096000
+5200,Asian,522,East,2026-10,5052000
+5200,Asian,522,East,2026-11,5042000
+5200,Asian,522,East,2026-12,4784000
+5210,Mexico,523,Mexico,2026-01,1000000
+5210,Mexico,523,Mexico,2026-02,1000000
+5210,Mexico,523,Mexico,2026-03,1000000
+5210,Mexico,523,Mexico,2026-04,1100000
+5210,Mexico,523,Mexico,2026-05,1100000
+5210,Mexico,523,Mexico,2026-06,1100000
+5210,Mexico,523,Mexico,2026-07,1200000
+5210,Mexico,523,Mexico,2026-08,1200000
+5210,Mexico,523,Mexico,2026-09,1200000
+5210,Mexico,523,Mexico,2026-10,1300000
+5210,Mexico,523,Mexico,2026-11,1300000
+5210,Mexico,523,Mexico,2026-12,1300000
+5300,Mainstream,531,Main Wholesale,2026-01,4749000
+5300,Mainstream,531,Main Wholesale,2026-02,4681000
+5300,Mainstream,531,Main Wholesale,2026-03,4445000
+5300,Mainstream,531,Main Wholesale,2026-04,4409000
+5300,Mainstream,531,Main Wholesale,2026-05,4372000
+5300,Mainstream,531,Main Wholesale,2026-06,4515000
+5300,Mainstream,531,Main Wholesale,2026-07,4745000
+5300,Mainstream,531,Main Wholesale,2026-08,4880000
+5300,Mainstream,531,Main Wholesale,2026-09,5052000
+5300,Mainstream,531,Main Wholesale,2026-10,5347000
+5300,Mainstream,531,Main Wholesale,2026-11,5157000
+5300,Mainstream,531,Main Wholesale,2026-12,5175000
+5300,Mainstream,532,Main Retail,2026-01,4056000
+5300,Mainstream,532,Main Retail,2026-02,3800000
+5300,Mainstream,532,Main Retail,2026-03,4093000
+5300,Mainstream,532,Main Retail,2026-04,4311000
+5300,Mainstream,532,Main Retail,2026-05,4568000
+5300,Mainstream,532,Main Retail,2026-06,4471000
+5300,Mainstream,532,Main Retail,2026-07,4273000
+5300,Mainstream,532,Main Retail,2026-08,4041000
+5300,Mainstream,532,Main Retail,2026-09,4126000
+5300,Mainstream,532,Main Retail,2026-10,3880000
+5300,Mainstream,532,Main Retail,2026-11,4050000
+5300,Mainstream,532,Main Retail,2026-12,3737000
+5400,National,541,National Club,2026-01,15300000
+5400,National,541,National Club,2026-02,14300000
+5400,National,541,National Club,2026-03,13400000
+5400,National,541,National Club,2026-04,13300000
+5400,National,541,National Club,2026-05,17200000
+5400,National,541,National Club,2026-06,13300000
+5400,National,541,National Club,2026-07,13700000
+5400,National,541,National Club,2026-08,17300000
+5400,National,541,National Club,2026-09,16700000
+5400,National,541,National Club,2026-10,17800000
+5400,National,541,National Club,2026-11,17300000
+5400,National,541,National Club,2026-12,17700000
+5400,National,542,National Retail,2026-01,7600000
+5400,National,542,National Retail,2026-02,7400000
+5400,National,542,National Retail,2026-03,7100000
+5400,National,542,National Retail,2026-04,6800000
+5400,National,542,National Retail,2026-05,7100000
+5400,National,542,National Retail,2026-06,6900000
+5400,National,542,National Retail,2026-07,7000000
+5400,National,542,National Retail,2026-08,7100000
+5400,National,542,National Retail,2026-09,8500000
+5400,National,542,National Retail,2026-10,9200000
+5400,National,542,National Retail,2026-11,7600000
+5400,National,542,National Retail,2026-12,8200000
+5400,National,543,E-Commerce,2026-01,1340000
+5400,National,543,E-Commerce,2026-02,1241000
+5400,National,543,E-Commerce,2026-03,1244000
+5400,National,543,E-Commerce,2026-04,1242000
+5400,National,543,E-Commerce,2026-05,1243000
+5400,National,543,E-Commerce,2026-06,1644000
+5400,National,543,E-Commerce,2026-07,1335000
+5400,National,543,E-Commerce,2026-08,1732000
+5400,National,543,E-Commerce,2026-09,2138000
+5400,National,543,E-Commerce,2026-10,1338000
+5400,National,543,E-Commerce,2026-11,2138000
+5400,National,543,E-Commerce,2026-12,1435000
+5400,National,544,Dollar & New,2026-01,520000
+5400,National,544,Dollar & New,2026-02,480000
+5400,National,544,Dollar & New,2026-03,460000
+5400,National,544,Dollar & New,2026-04,520000
+5400,National,544,Dollar & New,2026-05,460000
+5400,National,544,Dollar & New,2026-06,750000
+5400,National,544,Dollar & New,2026-07,490000
+5400,National,544,Dollar & New,2026-08,560000
+5400,National,544,Dollar & New,2026-09,520000
+5400,National,544,Dollar & New,2026-10,570000
+5400,National,544,Dollar & New,2026-11,650000
+5400,National,544,Dollar & New,2026-12,570000
+5500,Export,524,Canada (Export),2026-01,4200000
+5500,Export,524,Canada (Export),2026-02,3600000
+5500,Export,524,Canada (Export),2026-03,3600000
+5500,Export,524,Canada (Export),2026-04,3300000
+5500,Export,524,Canada (Export),2026-05,3400000
+5500,Export,524,Canada (Export),2026-06,3400000
+5500,Export,524,Canada (Export),2026-07,3500000
+5500,Export,524,Canada (Export),2026-08,3700000
+5500,Export,524,Canada (Export),2026-09,3900000
+5500,Export,524,Canada (Export),2026-10,4100000
+5500,Export,524,Canada (Export),2026-11,4100000
+5500,Export,524,Canada (Export),2026-12,4200000

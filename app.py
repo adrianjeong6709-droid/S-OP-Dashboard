@@ -4,6 +4,7 @@ import numpy as np
 import re
 import os
 import io
+from datetime import timedelta
 
 # 🎯 콤비네이션 차트용 Plotly (미설치 시에도 대시보드는 정상 작동)
 try:
@@ -72,6 +73,42 @@ GROUP_COLS = ['거래처 코드', '제품코드', '영업부명', '영업지점�
 PLAN_COLS = ['기준월'] + GROUP_COLS + ['계획수량', '소스']
 ACT_COLS = ['기준월'] + GROUP_COLS + ['실적수량']
 PROG_COLS = ['기준월'] + GROUP_COLS + ['마감여부', '실적수량']
+
+# =============================================================
+# 🎯 [추가됨] 월 목표 대비 진척현황(금액) 전용 저장소 및 설정
+# =============================================================
+GOAL_STORE = os.path.join(HIST_DIR, "sales_goal.csv")        # 연 1회 영업목표 (영구)
+BILL_STORE = os.path.join(HIST_DIR, "billing_done.csv")      # 빌링완료 스냅샷
+PRE_STORE = os.path.join(HIST_DIR, "preship_orders.csv")     # 빌링전 스냅샷
+GOAL_META = os.path.join(HIST_DIR, "goal_meta.csv")          # 스냅샷 기준일자
+
+GOAL_COLS = ['영업부코드', '영업부명', '영업지점코드', '영업지점명', '기준월', '목표금액']
+BILL_COLS = ['기준월', '영업부코드', '영업지점코드', '박스', '금액']
+PRE_COLS = ['기준월', '영업부코드', '영업지점코드', '상태', '출고예정일', '인도조건', '박스', '금액']
+
+# 🎯 원본 파일의 컬럼 위치(엑셀 열 문자). 파일 양식이 바뀌면 여기만 수정하면 됩니다.
+BILLING_COL_MAP = {'영업부코드': 'AM', '영업지점코드': 'AO', '박스': 'O', '금액': 'S'}
+PRESHIP_COL_MAP = {'문서구분': 'C', '상태': 'AA', '박스': 'V', '금액': 'W',
+                   '출고예정일': 'AK', '인도조건': 'AH',
+                   '영업부코드': 'L', '영업지점코드': 'N'}
+PRESHIP_DOCTYPE = 'YOCO'      # 빌링전 데이터에서 기본으로 선택하는 문서구분
+STATUS_SHIPPED = 'C3'         # 출고 완료
+STATUS_BILLED = 'C4'          # 빌링 완료(빌링전 파일에서는 집계 제외)
+DELIVERY_DDP = 'DDP'          # 배송 대기중
+DELIVERY_EXW = 'EXW'          # 픽업 대기중
+
+# 월 목표 탭 표의 컬럼 넓이 (원하는 픽셀로 조절 가능)
+GOAL_COL_CONFIG = {
+    "영업부": st.column_config.Column(width=110),
+    "영업지점": st.column_config.Column(width=150),
+}
+
+def col_letter_to_idx(letter):
+    """엑셀 열 문자(A, AM 등) → 0-based 인덱스"""
+    idx = 0
+    for ch in str(letter).strip().upper():
+        idx = idx * 26 + (ord(ch) - ord('A') + 1)
+    return idx - 1
 
 # 🎯 오류가 수정된 사발면류 완벽 맵핑 리스트 (모듈 공통 사용)
 PRODUCT_MAPPING = {
@@ -353,14 +390,23 @@ def process_progress_upload(prog_file, master_lookup, target_month):
 # =============================================================
 # 히스토리 저장소 입출력 및 업서트
 # =============================================================
+# 🎯 [성능] CSV 저장소는 파일이 바뀌지 않는 한 다시 읽지 않음 (mtime 캐시)
+@st.cache_data(show_spinner=False)
+def _read_store_csv(path, mtime):
+    return pd.read_csv(path, dtype=str, encoding='utf-8-sig')
+
 def load_store(path, columns, qty_col):
     if not os.path.exists(path):
         return pd.DataFrame(columns=columns)
-    df = pd.read_csv(path, dtype=str, encoding='utf-8-sig')
+    df = _read_store_csv(path, file_mtime(path)).copy()
     for c in columns:
         if c not in df.columns:
             df[c] = '' if c != qty_col else 0
     df[qty_col] = pd.to_numeric(df[qty_col], errors='coerce').fillna(0)
+    # 문자 컬럼의 결측은 빈 문자열로 (정렬 시 str/float 혼합 오류 방지)
+    for c in columns:
+        if c != qty_col:
+            df[c] = df[c].fillna('').astype(str)
     return df[columns]
 
 def save_store(df, path):
@@ -446,6 +492,487 @@ def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
     for col in GROUP_COLS + ['제품명']:
         comparison_df = comparison_df[comparison_df[col] != '미상']
     return comparison_df
+
+
+# =============================================================
+# 🎯 [추가됨] 탭6: 월 목표 대비 진척현황 (금액)
+# =============================================================
+def read_any(file):
+    """엑셀/CSV 자동 판별 읽기 (헤더 1행 기준)"""
+    name = getattr(file, 'name', '')
+    if str(name).lower().endswith('.csv'):
+        try:
+            return pd.read_csv(file, dtype=str, encoding='utf-8-sig')
+        except Exception:
+            file.seek(0)
+            return pd.read_csv(file, dtype=str, encoding='cp949')
+    return pd.read_excel(file, dtype=str)
+
+def to_num(s):
+    """숫자로 강제 변환. '$1,234.00', '1 234', '(1,234)'(음수), 공백/기호 혼입, 텍스트 저장 모두 처리"""
+    t = pd.Series(s).astype(str)
+    t = t.str.replace('\xa0', ' ', regex=False).str.strip()
+    neg = t.str.match(r'^\(.*\)$')                       # 회계식 괄호 음수
+    t = t.str.replace(r'[^0-9.\-]', '', regex=True)
+    t = t.str.replace(r'(?<=.)-', '', regex=True)        # 중간에 낀 하이픈 제거
+    t = t.replace({'': np.nan, '-': np.nan, '.': np.nan})
+    v = pd.to_numeric(t, errors='coerce').fillna(0)
+    return np.where(neg.fillna(False), -v.abs(), v)
+
+def norm_code(s):
+    """코드 정규화: 숫자/텍스트 혼재, '541.0', 공백, 콤마, 선행 0 차이를 흡수 (양쪽에 동일 적용)"""
+    t = pd.Series(s).astype(str).fillna('')
+    t = (t.str.replace('\xa0', ' ', regex=False).str.strip()
+          .str.replace(',', '', regex=False)
+          .str.replace(r'\.0+$', '', regex=True))
+    t = t.replace({'nan': '', 'NaN': '', 'None': '', 'NaT': '', '<NA>': ''}).fillna('')
+    # 숫자로만 이뤄진 코드는 선행 0을 제거해 '0541'과 '541'을 동일하게 취급
+    digits = t.str.fullmatch(r'\d+').fillna(False)
+    t = t.where(~digits, t.str.lstrip('0').replace('', '0'))
+    return t.fillna('')
+
+def to_date(s):
+    """날짜 변환: 문자열/날짜형은 물론 서식이 섞여 있거나 엑셀 일련번호(46239 등)여도 처리"""
+    t = pd.Series(s).astype(str).str.replace('\xa0', ' ', regex=False).str.strip()
+    try:
+        dt = pd.to_datetime(t, errors='coerce', format='mixed')   # 행마다 서식이 달라도 각각 해석
+    except Exception:
+        dt = pd.to_datetime(t, errors='coerce')
+    serial = t.str.fullmatch(r'\d{5}(\.\d+)?').fillna(False)      # 엑셀 날짜 일련번호 형태
+    if serial.any():
+        conv = pd.to_datetime(pd.to_numeric(t.where(serial), errors='coerce'),
+                              unit='D', origin='1899-12-30', errors='coerce')
+        dt = dt.where(~serial, conv)
+    return dt
+
+def parse_goal_month_col(c):
+    """'01/2026', '2026-01', 날짜형 등을 'YYYY-MM'으로"""
+    s = str(c).strip()
+    m = re.fullmatch(r'(\d{1,2})[/\-.](\d{4})', s)
+    if m:
+        return f"{m.group(2)}-{int(m.group(1)):02d}"
+    m = re.fullmatch(r'(\d{4})[/\-.](\d{1,2})', s)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}"
+    try:
+        return pd.to_datetime(s).strftime('%Y-%m')
+    except Exception:
+        return None
+
+def process_goal_upload(f):
+    """영업목표 파일 → 롱포맷(지점 × 월 × 목표금액)"""
+    df = read_any(f)
+    df.columns = df.columns.astype(str).str.replace('\xa0', ' ').str.strip()
+    need = ['영업부코드', '영업부명', '영업지점코드', '영업지점명']
+    if not all(c in df.columns for c in need):
+        return None
+    for c in ['영업부코드', '영업지점코드']:
+        df[c] = norm_code(df[c]).replace('', np.nan)
+    df[['영업부코드', '영업부명']] = df[['영업부코드', '영업부명']].ffill()   # 병합셀 대비
+    month_map = {c: parse_goal_month_col(c) for c in df.columns}
+    month_cols = {c: m for c, m in month_map.items() if m}
+    if not month_cols:
+        return None
+    out = df.melt(id_vars=need, value_vars=list(month_cols.keys()),
+                  var_name='_col', value_name='목표금액')
+    out['기준월'] = out['_col'].map(month_cols)
+    out['목표금액'] = to_num(out['목표금액'])
+    out = out[out['영업지점코드'].notna()]
+    return out.groupby(['영업부코드', '영업부명', '영업지점코드', '영업지점명', '기준월'],
+                       as_index=False)['목표금액'].sum()
+
+def process_billing_upload(f, month):
+    """빌링완료 파일 → 지점별 박스/금액 (필터 없음). month는 히스토리 키로 사용"""
+    df = read_any(f)
+    idx = {k: col_letter_to_idx(v) for k, v in BILLING_COL_MAP.items()}
+    if df.shape[1] <= max(idx.values()):
+        return None
+    out = pd.DataFrame({
+        '영업부코드': norm_code(df.iloc[:, idx['영업부코드']]),
+        '영업지점코드': norm_code(df.iloc[:, idx['영업지점코드']]),
+        '박스': to_num(df.iloc[:, idx['박스']]),
+        '금액': to_num(df.iloc[:, idx['금액']]),
+    })
+    out = out.groupby(['영업부코드', '영업지점코드'], as_index=False)[['박스', '금액']].sum()
+    out['기준월'] = month
+    return out[BILL_COLS]
+
+def process_preship_upload(f, month):
+    """빌링전 파일 → YOCO만 남기고 (상태 × 출고예정일 × 인도조건)별 집계. month는 히스토리 키"""
+    df = read_any(f)
+    idx = {k: col_letter_to_idx(v) for k, v in PRESHIP_COL_MAP.items()}
+    if df.shape[1] <= max(idx.values()):
+        return None
+    doc = df.iloc[:, idx['문서구분']].astype(str).str.strip().str.upper()
+    df = df[doc == PRESHIP_DOCTYPE.upper()]
+    if df.empty:
+        return None
+    dt = to_date(df.iloc[:, idx['출고예정일']])
+    out = pd.DataFrame({
+        '영업부코드': norm_code(df.iloc[:, idx['영업부코드']]),
+        '영업지점코드': norm_code(df.iloc[:, idx['영업지점코드']]),
+        '상태': df.iloc[:, idx['상태']].astype(str).str.replace('\xa0', ' ', regex=False).str.strip().str.upper(),
+        '출고예정일': dt.dt.strftime('%Y-%m-%d').fillna(''),
+        '인도조건': df.iloc[:, idx['인도조건']].astype(str).str.replace('\xa0', ' ', regex=False).str.strip().str.upper(),
+        '박스': to_num(df.iloc[:, idx['박스']]),
+        '금액': to_num(df.iloc[:, idx['금액']]),
+    })
+    out = out.groupby(['영업부코드', '영업지점코드', '상태', '출고예정일', '인도조건'],
+                      as_index=False)[['박스', '금액']].sum()
+    out['기준월'] = month
+    return out[PRE_COLS]
+
+def load_simple_store(path, columns, num_cols):
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=columns)
+    df = _read_store_csv(path, file_mtime(path)).copy()
+    for c in columns:
+        if c not in df.columns:
+            df[c] = ''
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+    # 문자 컬럼의 결측은 빈 문자열로 (정렬 시 str/float 혼합 오류 방지)
+    for c in columns:
+        if c not in num_cols:
+            df[c] = df[c].fillna('').astype(str)
+    for c in ['영업부코드', '영업지점코드']:
+        if c in df.columns:
+            df[c] = norm_code(df[c])
+    return df[columns]
+
+# 🎯 빌링완료/빌링전도 월 단위 히스토리로 관리: 올린 달만 교체, 나머지 달은 그대로 보존
+def upsert_month_store(new_df, month, path, columns, num_cols):
+    store = load_simple_store(path, columns, num_cols)
+    keep = store[store['기준월'] != month] if not store.empty else store
+    merged = pd.concat([keep, new_df[columns]], ignore_index=True)
+    save_store(merged, path)
+
+def save_meta(key, value):
+    meta = {}
+    if os.path.exists(GOAL_META):
+        m = pd.read_csv(GOAL_META, dtype=str, encoding='utf-8-sig')
+        meta = dict(zip(m['키'], m['값']))
+    meta[key] = str(value)
+    pd.DataFrame({'키': list(meta.keys()), '값': list(meta.values())}).to_csv(
+        GOAL_META, index=False, encoding='utf-8-sig')
+
+def load_meta(key):
+    if not os.path.exists(GOAL_META):
+        return ''
+    m = pd.read_csv(GOAL_META, dtype=str, encoding='utf-8-sig')
+    d = dict(zip(m['키'], m['값']))
+    return d.get(key, '')
+
+def build_week_ranges(month):
+    """대상월 전체를 월요일 시작 주차로 분할. 월 경계에서 잘라내며, 오늘 날짜와 무관하게 항상 동일한 결과.
+       (오더는 출고/빌링 시 출고예정일이 비워지므로, 지난 주차를 보여줘도 중복이 발생하지 않음)"""
+    ms = pd.Timestamp(month + '-01')
+    me = ms + pd.offsets.MonthEnd(0)
+    first_mon = ms - timedelta(days=int(ms.weekday()))
+    weeks, cur = [], first_mon
+    while cur <= me:
+        s, e = max(cur, ms), min(cur + timedelta(days=6), me)
+        weeks.append({'label': f"{s.month}/{s.day}일주", 'start': s, 'end': e})
+        cur = cur + timedelta(days=7)
+    return weeks, ms, me
+
+def _fmt_money(x):
+    if pd.isna(x) or x == 0:
+        return '-'
+    return f"${int(round(x)):,}"
+
+def _fmt_box(x):
+    if pd.isna(x) or x == 0:
+        return '-'
+    return f"{int(round(x)):,}"
+
+def _fmt_pct(x):
+    if pd.isna(x):
+        return '-'
+    return f"{x*100:.0f}%"
+
+def _fmt_diff(x):
+    if pd.isna(x) or x == 0:
+        return '-'
+    return f"${int(round(x)):+,}"
+
+
+# 🎯 월 목표 진척현황 표: 3단 헤더 HTML 생성 (마크다운 코드블록 오인 방지를 위해 들여쓰기 없이 출력)
+GOAL_TABLE_CSS = """<style>
+.goaltbl-wrap { overflow-x: auto; width: 100%; }
+.goaltbl { border-collapse: collapse; font-size: 12px; white-space: nowrap; }
+.goaltbl th, .goaltbl td { border: 1px solid #808080; padding: 4px 8px; text-align: right; }
+.goaltbl th { text-align: center; font-weight: 700; line-height: 1.25; }
+.goaltbl .lbl { text-align: left; }
+.goaltbl .h-base { background: #dbe5f1; color: #000; }
+.goaltbl .h-y { background: #fdf2cf; color: #000; }
+.goaltbl .h-y2 { background: #f8d97b; color: #000; }
+.goaltbl .h-g { background: #d9d9d9; color: #000; }
+.goaltbl .h-g2 { background: #a6a6a6; color: #000; }
+.goaltbl .h-e { background: #e2efda; color: #000; }
+.goaltbl .h-b { background: #1f4e79; color: #fff; }
+.goaltbl .gs { border-left: 3px solid #808080; }
+.goaltbl tr.sub td { background: #dce6f5; font-weight: 700; }
+.goaltbl tr.total td { background: #1f4e79; color: #fff; font-weight: 700; }
+</style>"""
+
+def build_goal_html(body, spec, week_specs, mm):
+    """body: (종류, 영업부, 영업지점, 값dict) 목록 / spec: (키, 종류, 색) 목록
+       굵은 구분선은 아래 5곳에만: 영업지점|영업목표, 영업목표|Billing 완료,
+       Billing+출고%|주차, 월 총 합계|출고 미확정, 출고 미확정|총 합계"""
+    def cell(v, kind):
+        if kind == 'money':
+            return _fmt_money(v)
+        if kind == 'box':
+            return _fmt_box(v)
+        return _fmt_pct(v)
+
+    # 굵은 세로선이 들어갈 컬럼(그 컬럼의 왼쪽 경계)
+    first_week_key = week_specs[0][0] if week_specs else '월합계 박스'
+    thick_keys = {'Billing 박스', first_week_key, '배송대기 박스', '총합계 박스'}
+    gs = {i for i, (k, _, _) in enumerate(spec) if k in thick_keys}
+    def th_cls(base, thick=False):
+        return f'{base} gs' if thick else base
+
+    h = [GOAL_TABLE_CSS, '<div class="goaltbl-wrap"><table class="goaltbl"><thead>']
+
+    # 1행: 상위 그룹
+    r1 = ['<tr>',
+          '<th class="h-base" rowspan="3">영업부</th>',
+          '<th class="h-base" rowspan="3">영업지점</th>',
+          '<th class="h-base gs" rowspan="3">영업목표</th>',
+          '<th class="h-y gs" colspan="3" rowspan="2">Billing 완료</th>',
+          '<th class="h-y" colspan="2" rowspan="2">출고 완료</th>',
+          '<th class="h-y2" rowspan="3">Billing +<br>출고 %</th>']
+    for wi, (_, _, lb) in enumerate(week_specs):
+        r1.append(f'<th class="{th_cls("h-g", wi == 0)}" colspan="2" rowspan="2">{lb}<br>출고 확정</th>')
+    r1 += [f'<th class="{th_cls("h-g", not week_specs)}" colspan="3" rowspan="2">{mm}월 출고 확정<br>합계</th>',
+           f'<th class="h-g" colspan="3" rowspan="2">{mm}월 총 합계<br>(Billing+출고 완료,확정)</th>',
+           f'<th class="h-e gs" colspan="4">{mm}월 출고 미확정</th>',
+           '<th class="h-b gs" colspan="2" rowspan="2">총 합계<br>(미확정 포함)</th>',
+           '<th class="h-b" rowspan="3">차이</th>',
+           '<th class="h-b" rowspan="3">%</th>', '</tr>']
+    h.append(''.join(r1))
+
+    # 2행: 출고 미확정 하위 그룹
+    h.append('<tr><th class="h-e gs" colspan="2">배송 대기</th>'
+             '<th class="h-e" colspan="2">픽업 대기</th></tr>')
+
+    # 3행: 박스 / 금액 / %
+    r3 = ['<tr>']
+    for i, (k, kind, color) in enumerate(spec):
+        if k in ('Billing+출고 %', '차이', '달성률'):
+            continue                      # rowspan=3 컬럼은 이 행에 셀이 없음
+        nm = '박스' if kind == 'box' else ('금액' if kind == 'money' else '%')
+        r3.append(f'<th class="{th_cls("h-" + color, i in gs)}">{nm}</th>')
+    r3.append('</tr>')
+    h.append(''.join(r3))
+    h.append('</thead><tbody>')
+
+    for kind_row, dept, branch, vals in body:
+        cls = {'row': '', 'sub': ' class="sub"', 'total': ' class="total"'}[kind_row]
+        pin = '📍 ' if kind_row == 'sub' else ''
+        tds = [f'<tr{cls}>',
+               f'<td class="lbl">{dept}</td>',
+               f'<td class="lbl">{pin}{branch}</td>',
+               f'<td class="gs">{_fmt_money(vals.get("영업목표"))}</td>']
+        for i, (k, kd, color) in enumerate(spec):
+            tds.append(f'<td class="gs">{cell(vals.get(k), kd)}</td>' if i in gs
+                       else f'<td>{cell(vals.get(k), kd)}</td>')
+        tds.append('</tr>')
+        h.append(''.join(tds))
+    h.append('</tbody></table></div>')
+    return ''.join(h)
+
+def render_goal_tab():
+    goal = load_simple_store(GOAL_STORE, GOAL_COLS, ['목표금액'])
+    if goal.empty:
+        return st.info("좌측 🎯 영역에서 영업목표 파일을 먼저 등록해주세요. (영업부코드/영업부명/영업지점코드/영업지점명 + 월별 목표 컬럼)")
+
+    bill = load_simple_store(BILL_STORE, BILL_COLS, ['박스', '금액'])
+    pre = load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])
+    snap = load_meta('기준일자')
+
+    months = sorted([m for m in goal['기준월'].unique() if isinstance(m, str) and m.strip()])
+    data_months = sorted({m for m in (set(bill['기준월']) | set(pre['기준월'])) if isinstance(m, str) and m.strip()})
+    if data_months:
+        cands = [m for m in months if m in set(data_months)]
+        default_idx = months.index(cands[-1]) if cands else len(months) - 1
+    else:
+        cur_m = pd.Timestamp.today().strftime('%Y-%m')
+        default_idx = months.index(cur_m) if cur_m in months else len(months) - 1
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        month = st.selectbox("📅 대상월", months, index=default_idx, key="goal_month")
+    with c2:
+        st.caption(f"📌 보유 빌링 데이터: **{', '.join(data_months) if data_months else '없음'}** / 기준일자: **{snap or '미등록'}** — "
+                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료를 함께 올려주세요. 금액 단위 USD. "
+                   "주차는 월요일 시작이며 월 경계(1일·말일)에서 잘립니다. 라벨은 각 구간의 시작일 기준이라 "
+                   "월초·월말의 짧은 조각 주는 그 조각의 첫날로 표기됩니다.")
+
+    # 🎯 선택한 달의 데이터만 사용 (월별 히스토리에서 추출)
+    bill = bill[bill['기준월'] == month]
+    pre = pre[pre['기준월'] == month].reset_index(drop=True)
+    if bill.empty and pre.empty:
+        st.warning(f"⚠️ {month} 빌링 데이터가 없습니다. 좌측 🎯 영역에서 해당 월 자료를 등록해주세요. (목표만 표시됩니다)")
+
+    weeks, ms, me = build_week_ranges(month)
+
+    g = goal[goal['기준월'] == month].copy()
+    if g.empty:
+        return st.warning(f"{month} 목표 데이터가 없습니다.")
+
+    # --- 지점 단위 집계 준비 ---
+    base = g[['영업부코드', '영업부명', '영업지점코드', '영업지점명', '목표금액']].copy()
+    base = base.groupby(['영업부코드', '영업부명', '영업지점코드', '영업지점명'], as_index=False)['목표금액'].sum()
+
+    # 목표에 없는 지점(예: NSA HQ)도 실적이 있으면 하단에 표시
+    known = set(base['영업지점코드'])
+    extra_codes = set(bill['영업지점코드']) | set(pre['영업지점코드'])
+    extra_codes = {c for c in extra_codes if c and c not in known and c != 'nan'}
+    if extra_codes:
+        ex = pd.DataFrame({'영업지점코드': sorted(extra_codes)})
+        ex['영업부코드'] = ''
+        ex['영업부명'] = '목표 미등록'
+        ex['영업지점명'] = ex['영업지점코드']
+        ex['목표금액'] = 0.0
+        base = pd.concat([base, ex[base.columns]], ignore_index=True)
+
+    def agg_by_branch(df, mask=None):
+        d = df if mask is None else df[mask]
+        if d.empty:
+            return pd.DataFrame({'영업지점코드': pd.Series(dtype='object'),
+                                 '박스': pd.Series(dtype='float64'),
+                                 '금액': pd.Series(dtype='float64')})
+        return d.groupby('영업지점코드', as_index=False)[['박스', '금액']].sum()
+
+    def join(col_box, col_amt, agg):
+        # 숫자형으로 명시 변환해 결측 채우기 (dtype 다운캐스팅 경고 방지)
+        m = base[['영업지점코드']].merge(agg, on='영업지점코드', how='left')
+        base[col_box] = pd.to_numeric(m['박스'], errors='coerce').fillna(0.0).to_numpy()
+        base[col_amt] = pd.to_numeric(m['금액'], errors='coerce').fillna(0.0).to_numpy()
+
+    # ① Billing 완료
+    join('Billing 박스', 'Billing 금액', agg_by_branch(bill))
+
+    # ② 출고 완료 (상태 C3)
+    join('출고 박스', '출고 금액', agg_by_branch(pre, pre['상태'] == STATUS_SHIPPED))
+
+    # ③ 주차별 출고 일정 확정 (출고예정일이 해당 주 범위)
+    pdt = pd.to_datetime(pre['출고예정일'], errors='coerce')
+    week_cols = []
+    for w in weeks:
+        mask = pdt.notna() & (pdt >= w['start']) & (pdt <= w['end'])
+        bx, am = f"{w['label']} 박스", f"{w['label']} 금액"
+        join(bx, am, agg_by_branch(pre, mask))
+        week_cols += [bx, am]
+
+    # 대상월 범위를 벗어난 출고예정 건(다음 달 등)은 이 달 집계에서 제외 — 금액만 안내
+    out_mask = pdt.notna() & ((pdt < ms) | (pdt > me))
+    if out_mask.any():
+        out_amt = float(pre.loc[out_mask, '금액'].sum())
+        st.caption(f"ℹ️ 출고예정일이 {month} 범위를 벗어난 건 {int(out_mask.sum())}행 / ${out_amt:,.0f} 은 "
+                   "해당 월 실적이 아니므로 이 표에서 제외했습니다.")
+
+    # ④ 월 합계 (주차별 합)
+    base['월합계 박스'] = base[[c for c in week_cols if c.endswith('박스')]].sum(axis=1)
+    base['월합계 금액'] = base[[c for c in week_cols if c.endswith('금액')]].sum(axis=1)
+
+    # ⑤ 출고 확정 합계 = Billing + 출고 + 월합계
+    base['확정합계 박스'] = base['Billing 박스'] + base['출고 박스'] + base['월합계 박스']
+    base['확정합계 금액'] = base['Billing 금액'] + base['출고 금액'] + base['월합계 금액']
+
+    # ⑥ 출고 미확정 (C3·C4 제외 + 출고예정일 없음) → DDP / EXW
+    undecided = (~pre['상태'].isin([STATUS_SHIPPED, STATUS_BILLED])) & (pdt.isna())
+    join('배송대기 박스', '배송대기 금액', agg_by_branch(pre, undecided & (pre['인도조건'] == DELIVERY_DDP)))
+    join('픽업대기 박스', '픽업대기 금액', agg_by_branch(pre, undecided & (pre['인도조건'] == DELIVERY_EXW)))
+
+    # ⑦ 총 합계 / 차이 / 달성률
+    base['총합계 박스'] = base['확정합계 박스'] + base['배송대기 박스'] + base['픽업대기 박스']
+    base['총합계 금액'] = base['확정합계 금액'] + base['배송대기 금액'] + base['픽업대기 금액']
+
+    def ratio(num, den):
+        return np.where(den > 0, num / den.replace(0, np.nan), np.nan)
+
+    base['Billing %'] = ratio(base['Billing 금액'], base['목표금액'])
+    base['Billing+출고 %'] = ratio(base['Billing 금액'] + base['출고 금액'], base['목표금액'])
+    base['월합계 %'] = ratio(base['월합계 금액'], base['목표금액'])
+    base['확정합계 %'] = ratio(base['확정합계 금액'], base['목표금액'])
+    base['차이'] = base['총합계 금액'] - base['목표금액']
+    base['달성률'] = ratio(base['총합계 금액'], base['목표금액'])
+
+    value_cols = (['영업목표', 'Billing 박스', 'Billing 금액', 'Billing %', '출고 박스', '출고 금액', 'Billing+출고 %']
+                  + week_cols + ['월합계 박스', '월합계 금액', '월합계 %',
+                                 '확정합계 박스', '확정합계 금액', '확정합계 %',
+                                 '배송대기 박스', '배송대기 금액', '픽업대기 박스', '픽업대기 금액',
+                                 '총합계 박스', '총합계 금액', '차이', '달성률'])
+    base = base.rename(columns={'목표금액': '영업목표'})
+
+    # 🎯 [1] 값이 전혀 없는 주차 컬럼은 숨김 (이미 Billing/출고 완료에 반영된 지난 주차 등)
+    kept_weeks = []
+    for w in weeks:
+        bx, am = f"{w['label']} 박스", f"{w['label']} 금액"
+        if float(base[bx].sum()) != 0 or float(base[am].sum()) != 0:
+            kept_weeks.append(w)
+        else:
+            base = base.drop(columns=[bx, am])
+    hidden_n = len(weeks) - len(kept_weeks)
+    if hidden_n:
+        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개는 숨겼습니다 "
+                   "(해당 주차 오더는 이미 Billing 완료·출고 완료에 반영됨).")
+
+    # --- 행 구성: 영업부별 지점 → 영업부 합계 → 총 합계 ---
+    money_cols = [c for c in base.columns if ('금액' in c) or (c in ('영업목표', '차이'))]
+    box_cols = [c for c in base.columns if '박스' in c]
+
+    def summarize(block):
+        s = {c: float(block[c].sum()) for c in money_cols + box_cols}
+        tgt = s.get('영업목표', 0)
+        s['Billing %'] = (s['Billing 금액'] / tgt) if tgt else np.nan
+        s['Billing+출고 %'] = ((s['Billing 금액'] + s['출고 금액']) / tgt) if tgt else np.nan
+        s['월합계 %'] = (s['월합계 금액'] / tgt) if tgt else np.nan
+        s['확정합계 %'] = (s['확정합계 금액'] / tgt) if tgt else np.nan
+        s['차이'] = s['총합계 금액'] - tgt
+        s['달성률'] = (s['총합계 금액'] / tgt) if tgt else np.nan
+        return s
+
+    # 🎯 정렬: 영업부는 목표 합계 내림차순 → 부서 내 지점도 목표 내림차순 (목표 미등록 그룹은 맨 아래)
+    dept_total = base.groupby('영업부명')['영업목표'].sum().sort_values(ascending=False)
+    dept_order = [d for d in dept_total.index if d != '목표 미등록']
+    if '목표 미등록' in dept_total.index:
+        dept_order.append('목표 미등록')
+
+    body = []   # (종류, 영업부, 영업지점, 값dict)
+    for d in dept_order:
+        blk = base[base['영업부명'] == d].sort_values('영업목표', ascending=False)
+        for _, r in blk.iterrows():
+            body.append(('row', d, r['영업지점명'], r.to_dict()))
+        if len(blk) > 1:
+            body.append(('sub', d, f"{d} 합계", summarize(blk)))
+    body.append(('total', '총 합계', '', summarize(base)))
+
+    # --- 3단 헤더 HTML 테이블 (엑셀 보고서 형태) ---
+    mm = int(month[5:7])
+    week_specs = [(f"{w['label']} 박스", f"{w['label']} 금액", w['label']) for w in kept_weeks]
+
+    # (키, 종류, 그룹색)
+    spec = ([('Billing 박스', 'box', 'y'), ('Billing 금액', 'money', 'y'), ('Billing %', 'pct', 'y'),
+             ('출고 박스', 'box', 'y'), ('출고 금액', 'money', 'y'),
+             ('Billing+출고 %', 'pct', 'y2')]
+            + [x for (bx, am, _) in week_specs for x in [(bx, 'box', 'g'), (am, 'money', 'g')]]
+            + [('월합계 박스', 'box', 'g'), ('월합계 금액', 'money', 'g'), ('월합계 %', 'pct', 'g'),
+               ('확정합계 박스', 'box', 'g'), ('확정합계 금액', 'money', 'g'), ('확정합계 %', 'pct', 'g2'),
+               ('배송대기 박스', 'box', 'e'), ('배송대기 금액', 'money', 'e'),
+               ('픽업대기 박스', 'box', 'e'), ('픽업대기 금액', 'money', 'e'),
+               ('총합계 박스', 'box', 'b'), ('총합계 금액', 'money', 'b'),
+               ('차이', 'money', 'b'), ('달성률', 'pct', 'b')])
+
+    st.markdown(build_goal_html(body, spec, week_specs, mm), unsafe_allow_html=True)
+
+    st.caption("💡 Billing % = Billing 금액 ÷ 영업목표 / Billing+출고 % = (Billing + 출고 완료) ÷ 영업목표 / "
+               f"{mm}월 출고 확정 합계 = 주차별 확정의 합 / {mm}월 총 합계 = Billing + 출고 완료 + 출고 확정 / "
+               "총 합계(미확정 포함) = 여기에 배송·픽업 대기를 더한 값 / 차이 = 총 합계 - 영업목표 / % = 총 합계 ÷ 영업목표. "
+               "각 오더는 상태에 따라 한 곳에만 집계되어 중복이 없습니다.")
 
 
 # =============================================================
@@ -560,6 +1087,59 @@ if IS_ADMIN:
                         st.sidebar.success(f"진척도 데이터 반영 완료 (대상월: {tm})")
                         st.rerun()
 
+# --- 월 목표 대비 진척현황 데이터 ---
+if IS_ADMIN:
+    st.sidebar.divider()
+    st.sidebar.header("🎯 월 목표 진척현황 데이터")
+    st.sidebar.caption("영업목표는 연 1회 등록(영구 보관). 빌링완료·빌링전 두 파일은 항상 같은 시점 자료를 함께 올려주세요.")
+
+    goal_file = st.sidebar.file_uploader("6. 영업목표 (연 1회)", type=['xlsx', 'csv'], key="up_goal")
+    if goal_file is not None and st.sidebar.button("✅ 영업목표 등록/교체", key="goal_btn"):
+        try:
+            parsed_goal = process_goal_upload(goal_file)
+        except Exception as e:
+            parsed_goal = None
+            st.sidebar.error(f"영업목표 해석 실패: {e}")
+        if parsed_goal is None or parsed_goal.empty:
+            st.sidebar.error("영업목표 형식을 확인해주세요. (영업부코드/영업부명/영업지점코드/영업지점명 + 월별 목표 컬럼 필요)")
+        else:
+            save_store(parsed_goal[GOAL_COLS], GOAL_STORE)
+            st.sidebar.success(f"영업목표 등록 완료 ({parsed_goal['기준월'].nunique()}개월 × {parsed_goal['영업지점코드'].nunique()}개 지점)")
+            st.rerun()
+
+    sc1, sc2 = st.sidebar.columns(2)
+    with sc1:
+        snap_date = st.date_input("기준일자", value=pd.Timestamp.today().date(), key="goal_snap_date")
+    with sc2:
+        snap_month_in = st.text_input("대상월", value=pd.Timestamp.today().strftime('%Y-%m'), key="goal_snap_month")
+    st.sidebar.caption("※ 대상월 = 이 데이터가 담고 있는 월(YYYY-MM). 월별로 보관되며 같은 달을 다시 올리면 그 달만 교체됩니다.")
+    bill_file = st.sidebar.file_uploader("7. 빌링완료 데이터", type=['xlsx', 'csv'], key="up_bill")
+    pre_file = st.sidebar.file_uploader("8. 빌링전 데이터", type=['xlsx', 'csv'], key="up_pre")
+    if st.sidebar.button("✅ 빌링완료 + 빌링전 함께 반영", key="billpre_btn"):
+        tgt_m = parse_month(snap_month_in)
+        if bill_file is None or pre_file is None:
+            st.sidebar.warning("두 파일(빌링완료·빌링전)을 모두 올린 뒤 눌러주세요. 기준 시점이 어긋나면 중복 집계가 발생합니다.")
+        elif not (isinstance(tgt_m, str) and re.fullmatch(r'\d{4}-\d{2}', tgt_m)):
+            st.sidebar.error("대상월 형식이 올바르지 않습니다. 예: 2026-07")
+        else:
+            try:
+                b = process_billing_upload(bill_file, tgt_m)
+                p = process_preship_upload(pre_file, tgt_m)
+            except Exception as e:
+                b = p = None
+                st.sidebar.error(f"파일 해석 실패: {e}")
+            if b is None or b.empty:
+                st.sidebar.error("빌링완료 파일에서 데이터를 읽지 못했습니다. 컬럼 위치(AM/AO/O/S)를 확인해주세요.")
+            elif p is None or p.empty:
+                st.sidebar.error(f"빌링전 파일에서 '{PRESHIP_DOCTYPE}' 데이터를 찾지 못했습니다. 컬럼 위치를 확인해주세요.")
+            else:
+                upsert_month_store(b, tgt_m, BILL_STORE, BILL_COLS, ['박스', '금액'])
+                upsert_month_store(p, tgt_m, PRE_STORE, PRE_COLS, ['박스', '금액'])
+                save_meta('기준일자', snap_date)
+                save_meta('대상월', tgt_m)
+                st.sidebar.success(f"{tgt_m} 반영 완료 (기준일자 {snap_date}) — 다른 달 데이터는 그대로 보존됩니다.")
+                st.rerun()
+
 # --- 저장 현황 및 관리 ---
 st.sidebar.divider()
 st.sidebar.header("🗂️ 저장 데이터 현황" + ("/관리" if IS_ADMIN else ""))
@@ -568,33 +1148,49 @@ if not IS_ADMIN:
 _plan_store = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
 _act_store = load_store(ACT_STORE, ACT_COLS, '실적수량')
 _prog_store = load_store(PROG_STORE, PROG_COLS, '실적수량')
-plan_months = sorted(_plan_store['기준월'].unique())
-usmx_months = sorted(_plan_store[_plan_store['소스'] == 'USMX']['기준월'].unique())
-can_months = sorted(_plan_store[_plan_store['소스'] == 'CAN']['기준월'].unique())
-act_months = sorted(_act_store['기준월'].unique())
-prog_months = sorted(_prog_store['기준월'].unique())
+plan_months = sorted([m for m in _plan_store['기준월'].unique() if isinstance(m, str) and m.strip()])
+usmx_months = sorted([m for m in _plan_store[_plan_store['소스'] == 'USMX']['기준월'].unique() if isinstance(m, str) and m.strip()])
+can_months = sorted([m for m in _plan_store[_plan_store['소스'] == 'CAN']['기준월'].unique() if isinstance(m, str) and m.strip()])
+act_months = sorted([m for m in _act_store['기준월'].unique() if isinstance(m, str) and m.strip()])
+prog_months = sorted([m for m in _prog_store['기준월'].unique() if isinstance(m, str) and m.strip()])
 st.sidebar.caption(f"계획(USA,MEX): {', '.join(usmx_months) if usmx_months else '없음'}")
 st.sidebar.caption(f"계획(CAN): {', '.join(can_months) if can_months else '없음'}")
 st.sidebar.caption(f"실적 보유: {', '.join(act_months) if act_months else '없음'}")
 st.sidebar.caption(f"진척도 보유: {', '.join(prog_months) if prog_months else '없음'}")
+_goal_store = load_simple_store(GOAL_STORE, GOAL_COLS, ['목표금액'])
+if not _goal_store.empty:
+    _gm = sorted([m for m in _goal_store['기준월'].unique() if isinstance(m, str) and m.strip()])
+    st.sidebar.caption(f"영업목표: {_gm[0]} ~ {_gm[-1]}")
+_bill_months = sorted({m for m in (set(load_simple_store(BILL_STORE, BILL_COLS, ['박스', '금액'])['기준월'])
+                                   | set(load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])['기준월']))
+                       if isinstance(m, str) and m.strip()})
+st.sidebar.caption(f"빌링 보유: {', '.join(_bill_months) if _bill_months else '없음'} (최근 기준일자 {load_meta('기준일자') or '없음'})")
 
 if IS_ADMIN:
     with st.sidebar.expander("🧹 특정 월 삭제 / 전체 초기화"):
-        del_target = st.selectbox("대상 저장소", ["계획", "실적", "진척도"], key="del_store")
-        _opts = {'계획': plan_months, '실적': act_months, '진척도': prog_months}[del_target]
+        del_target = st.selectbox("대상 저장소", ["계획", "실적", "진척도", "빌링(목표진척)"], key="del_store")
+        _opts = {'계획': plan_months, '실적': act_months, '진척도': prog_months,
+                 '빌링(목표진척)': _bill_months}[del_target]
         if _opts:
             del_month_sel = st.selectbox("삭제할 월", _opts, key="del_month")
             if st.button("해당 월 삭제", key="del_btn"):
-                _map = {'계획': (PLAN_STORE, PLAN_COLS, '계획수량'),
-                        '실적': (ACT_STORE, ACT_COLS, '실적수량'),
-                        '진척도': (PROG_STORE, PROG_COLS, '실적수량')}
-                delete_month(*_map[del_target], del_month_sel)
+                if del_target == '빌링(목표진척)':
+                    # 빌링완료 + 빌링전 두 저장소에서 해당 월 제거
+                    for _p, _c, _n in [(BILL_STORE, BILL_COLS, ['박스', '금액']),
+                                       (PRE_STORE, PRE_COLS, ['박스', '금액'])]:
+                        _s = load_simple_store(_p, _c, _n)
+                        save_store(_s[_s['기준월'] != del_month_sel], _p)
+                else:
+                    _map = {'계획': (PLAN_STORE, PLAN_COLS, '계획수량'),
+                            '실적': (ACT_STORE, ACT_COLS, '실적수량'),
+                            '진척도': (PROG_STORE, PROG_COLS, '실적수량')}
+                    delete_month(*_map[del_target], del_month_sel)
                 st.rerun()
         else:
             st.caption("저장된 월이 없습니다.")
         confirm_reset = st.checkbox("전체 초기화에 동의합니다 (복구 불가)", key="reset_ok")
         if st.button("🚨 히스토리 전체 초기화", key="reset_btn") and confirm_reset:
-            for p in [PLAN_STORE, ACT_STORE, PROG_STORE]:
+            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META]:
                 if os.path.exists(p):
                     os.remove(p)
             st.rerun()
@@ -978,7 +1574,7 @@ def apply_product_filters(df, kw_input, acc_threshold, months_list):
 
 
 # =============================================================
-# 🎯 [추가됨] 탭4: 전월 대비 정확도/GAP 개선 (영업사원별)
+# 🎯 탭4: 전월 대비 정확도/GAP 개선 (영업사원별)
 # =============================================================
 def render_improvement_tab(df, available_months):
     if df is None or df.empty or len(available_months) < 2:
@@ -1062,9 +1658,8 @@ def render_improvement_tab(df, available_months):
     st.dataframe(styled, width='content', hide_index=True, height=h, column_config=COMMON_COL_CONFIG)
 
     # 전체 평균: 두 가지 기준을 모두 표시
-    # 🎯 [수정됨] ① 사원 기준 = 표의 사원 행 전체 평균 (사원 1명 = 1표)
-    #            ② 지점 기준 = 표에 표시된 지점 소계들의 평균 (지점 1개 = 1표, 탭2 전체 평균과 동일·손검산 일치)
-    #    GAP은 두 기준 모두 동일한 전체 합계. 개선값은 '표시된 전월·당월 값의 차이'로 계산해 검산이 항상 일치.
+    # ① 사원 기준 = 표의 사원 행 전체 평균 (사원 1명 = 1표)
+    # ② 지점 기준 = 표에 표시된 지점 소계들의 평균 (지점 1개 = 1표, 탭2 전체 평균과 동일·손검산 일치)
     br_used = br[br['영업지점명'].isin(used_branches)]
     p_acc_prev, p_acc_cur = flat[acc_prev].mean(), flat[acc_cur].mean()
     b_acc_prev, b_acc_cur = br_used[acc_prev].mean(), br_used[acc_cur].mean()
@@ -1082,7 +1677,7 @@ def render_improvement_tab(df, available_months):
 
 
 # =============================================================
-# 🎯 [추가됨] 탭5: 당월 진척도 렌더링
+# 🎯 탭5: 당월 진척도 렌더링
 # =============================================================
 def render_progress_tab():
     prog = load_store(PROG_STORE, PROG_COLS, '실적수량')
@@ -1100,7 +1695,7 @@ def render_progress_tab():
 
     p_months = sorted(prog['기준월'].unique())
     month = st.selectbox("📅 진척도 대상월", p_months, index=len(p_months) - 1)
-    # 🎯 기간 한정 규칙 적용 (KDH 한시 통합, 시작월부터 제외 — 저장 원본은 불변)
+    # 기간 한정 규칙 적용 (KDH 한시 통합, 시작월부터 제외 — 저장 원본은 불변)
     prog_m = apply_period_rules(prog[prog['기준월'] == month], 'actual')
     if prog_m.empty:
         return st.info("기간 한정 규칙 적용 후 남은 진척도 데이터가 없습니다.")
@@ -1142,7 +1737,7 @@ def render_progress_tab():
     if merged.empty:
         return st.info("집계 가능한 데이터가 없습니다.")
 
-    # 🎯 [추가됨] 국가 필터 (USA/MEX/CAN 등 복수 선택·해제)
+    # 국가 필터 (USA/MEX/CAN 등 복수 선택·해제)
     all_countries = sorted(merged['국가'].unique())
     sel_countries = st.multiselect("🌍 국가 필터", all_countries, default=all_countries, key="prog_country")
     merged = merged[merged['국가'].isin(sel_countries)]
@@ -1159,7 +1754,7 @@ def render_progress_tab():
     prod['GAP'] = prod['계획수량'] - prod['실적수량']
     prod = prod.sort_values('진척도', na_position='last')
     prod_disp = prod.rename(columns={'계획수량': '계획', '실적수량': '실적'})[['제품코드', '제품명'] + fmt_cols].reset_index(drop=True)
-    # 🎯 [추가됨] 계획 없이 실적 발생(진척도 ∞) 품목 행은 옅은 붉은색 처리
+    # 계획 없이 실적 발생(진척도 ∞) 품목 행은 옅은 붉은색 처리
     inf_rows_prod = set(prod_disp.index[np.isinf(prod_disp['진척도'].fillna(0))])
 
     def highlight_prod(row):
@@ -1179,7 +1774,7 @@ def render_progress_tab():
     st.markdown("---")
     st.markdown("##### ② 진척도 하위 품목 상세 (제품 × 영업부 × 지점 × 사원)")
     thr = st.number_input("진척도 X% 이하 품목만 (100=전체)", min_value=0, max_value=500, value=100, step=5, key="prog_thr")
-    # 🎯 [수정됨] 진척도 무한대(계획 없이 실적 발생) 품목은 항상 리스트 맨 아래에 붉은색으로 포함
+    # 진척도 무한대(계획 없이 실적 발생) 품목은 항상 리스트 맨 아래에 붉은색으로 포함
     low_codes = prod[prod['진척도'].fillna(np.inf) <= thr / 100]['제품코드'].tolist()   # 유한 진척도만
     inf_codes = prod[np.isinf(prod['진척도'].fillna(0))]['제품코드'].tolist()          # 계획 0 & 실적 발생
     list_codes = low_codes + inf_codes
@@ -1237,7 +1832,7 @@ def render_progress_tab():
     st.markdown("##### ③ 선택 품목 기준 지점 · 영업사원별 GAP (GAP 큰 순)")
     st.caption("💡 위 ②에서 지정한 진척도 조건에 걸린 품목들만 집계한 GAP입니다. GAP = 계획 - 실적 (양수 = 미달). "
                "②에 리스트업된 제품 중 진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외했습니다.")
-    gap_df = merged[merged['제품코드'].isin(low_codes)]  # 🎯 ∞ 품목 제외 (유한 진척도 품목만)
+    gap_df = merged[merged['제품코드'].isin(low_codes)]  # ∞ 품목 제외 (유한 진척도 품목만)
     if gap_df.empty:
         return st.info("GAP 집계 대상 품목이 없습니다. (∞ 품목 제외 기준)")
     pg = gap_df.groupby(['영업지점명', '영업사원명'], as_index=False)[['계획수량', '실적수량']].sum()
@@ -1278,12 +1873,13 @@ if master_ready and item_master_ready and exclusion_ready:
                               file_mtime(item_master_path), file_mtime(exclusion_path),
                               PERIOD_RULES_KEY)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 1. 제품별 실적 뷰",
         "🏢 2. 영업조직별 실적 뷰",
         "🛠️ 3. 상세 분석 (조직/사원별 딥다이브)",
         "📈 4. 전월 대비 개선 (사원별)",
-        "⏱️ 5. 당월 진척도"
+        "⏱️ 5. 당월 진척도",
+        "💰 6. 월 목표 대비 진척현황"
     ])
 
     if raw_df is None or raw_df.empty:
@@ -1413,6 +2009,10 @@ if master_ready and item_master_ready and exclusion_ready:
     with tab5:
         st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검용)")
         render_progress_tab()
+
+    with tab6:
+        st.markdown("##### 월 영업목표 대비 실적 현황 (금액 기준)")
+        render_goal_tab()
 
 else:
     st.info("하단 ⚙️ 마스터 데이터 3종을 먼저 등록해주세요. 등록 후 좌측 📚 영역에서 계획/실적을 히스토리에 반영하면, 재업로드 없이 항상 대시보드가 표시됩니다.")
