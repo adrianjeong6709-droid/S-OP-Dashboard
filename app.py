@@ -37,7 +37,7 @@ st.set_page_config(
     # 🎯 조회 전용(클라우드)에서는 사이드바를 접은 상태로 시작. 로컬은 기존처럼 펼침.
     initial_sidebar_state=("collapsed" if _READ_ONLY else "expanded")
 )
-st.title("S&OP 수요계획 대비 실적 대시보드 (고도화 뷰)")
+st.title("S&OP 대시보드 (고도화 뷰)")
 
 # 🎯 공통 컬럼 넓이 설정 (원하는 픽셀 크기로 조절 가능)
 COMMON_COL_CONFIG = {
@@ -92,6 +92,15 @@ PRESHIP_COL_MAP = {'문서구분': 'C', '상태': 'AA', '박스': 'V', '금액':
                    '출고예정일': 'AK', '인도조건': 'AH',
                    '영업부코드': 'L', '영업지점코드': 'N'}
 PRESHIP_DOCTYPE = 'YOCO'      # 빌링전 데이터에서 기본으로 선택하는 문서구분
+
+# [지점코드 통합] 탭6 집계 시 왼쪽 코드를 오른쪽 코드로 합산 (저장 원본은 불변, 설정만 지우면 원복)
+BRANCH_CODE_MERGE = {
+    '545': '543',    # E-Commerce Project A → E-Commerce
+}
+# [목표 미등록 지점 표시명] 영업목표 파일에 없는 지점코드의 (영업부명, 영업지점명). 목표는 '-'로 표시됨
+UNGOALED_BRANCH_NAMES = {
+    '511': ('NSA-HQ', 'NSA-HQ'),
+}
 STATUS_SHIPPED = 'C3'         # 출고 완료
 STATUS_BILLED = 'C4'          # 빌링 완료(빌링전 파일에서는 집계 제외)
 DELIVERY_DDP = 'DDP'          # 배송 대기중
@@ -787,7 +796,7 @@ def build_goal_html(body, spec, week_specs, mm):
 def render_goal_tab():
     goal = load_simple_store(GOAL_STORE, GOAL_COLS, ['목표금액'])
     if goal.empty:
-        return st.info("좌측 🎯 영역에서 영업목표 파일을 먼저 등록해주세요. (영업부코드/영업부명/영업지점코드/영업지점명 + 월별 목표 컬럼)")
+        return st.info("좌측 🎯 영역에서 영업목표 파일을 먼저 등록해주세요.")
 
     bill = load_simple_store(BILL_STORE, BILL_COLS, ['박스', '금액'])
     pre = load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])
@@ -806,15 +815,17 @@ def render_goal_tab():
         month = st.selectbox("📅 대상월", months, index=default_idx, key="goal_month")
     with c2:
         st.caption(f"📌 보유 빌링 데이터: **{', '.join(data_months) if data_months else '없음'}** / 기준일자: **{snap or '미등록'}** — "
-                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료를 함께 올려주세요. 금액 단위 USD. "
-                   "주차는 월요일 시작이며 월 경계(1일·말일)에서 잘립니다. 라벨은 각 구간의 시작일 기준이라 "
-                   "월초·월말의 짧은 조각 주는 그 조각의 첫날로 표기됩니다.")
+                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료를 함께 올려주세요. 금액 단위 USD. ")
 
     # 🎯 선택한 달의 데이터만 사용 (월별 히스토리에서 추출)
-    bill = bill[bill['기준월'] == month]
-    pre = pre[pre['기준월'] == month].reset_index(drop=True)
+    bill = bill[bill['기준월'] == month].copy()
+    pre = pre[pre['기준월'] == month].reset_index(drop=True).copy()
+    # 지점코드 통합 (예: E-Commerce Project A 545 → E-Commerce 543)
+    if BRANCH_CODE_MERGE:
+        bill['영업지점코드'] = bill['영업지점코드'].replace(BRANCH_CODE_MERGE)
+        pre['영업지점코드'] = pre['영업지점코드'].replace(BRANCH_CODE_MERGE)
     if bill.empty and pre.empty:
-        st.warning(f"⚠️ {month} 빌링 데이터가 없습니다. 좌측 🎯 영역에서 해당 월 자료를 등록해주세요. (목표만 표시됩니다)")
+        st.warning(f"⚠️ {month} 빌링 데이터가 없습니다. 좌측 🎯 영역에서 해당 월 자료를 등록해주세요.")
 
     weeks, ms, me = build_week_ranges(month)
 
@@ -833,8 +844,9 @@ def render_goal_tab():
     if extra_codes:
         ex = pd.DataFrame({'영업지점코드': sorted(extra_codes)})
         ex['영업부코드'] = ''
-        ex['영업부명'] = '목표 미등록'
-        ex['영업지점명'] = ex['영업지점코드']
+        # 등록된 표시명이 있으면 그 이름으로, 없으면 '목표 미등록' + 코드로 표기
+        ex['영업부명'] = [UNGOALED_BRANCH_NAMES.get(c, ('목표 미등록', c))[0] for c in ex['영업지점코드']]
+        ex['영업지점명'] = [UNGOALED_BRANCH_NAMES.get(c, ('목표 미등록', c))[1] for c in ex['영업지점코드']]
         ex['목표금액'] = 0.0
         base = pd.concat([base, ex[base.columns]], ignore_index=True)
 
@@ -918,7 +930,7 @@ def render_goal_tab():
             base = base.drop(columns=[bx, am])
     hidden_n = len(weeks) - len(kept_weeks)
     if hidden_n:
-        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개는 숨겼습니다 "
+        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개는 숨김처리 완료 "
                    "(해당 주차 오더는 이미 Billing 완료·출고 완료에 반영됨).")
 
     # --- 행 구성: 영업부별 지점 → 영업부 합계 → 총 합계 ---
@@ -969,10 +981,7 @@ def render_goal_tab():
 
     st.markdown(build_goal_html(body, spec, week_specs, mm), unsafe_allow_html=True)
 
-    st.caption("💡 Billing % = Billing 금액 ÷ 영업목표 / Billing+출고 % = (Billing + 출고 완료) ÷ 영업목표 / "
-               f"{mm}월 출고 확정 합계 = 주차별 확정의 합 / {mm}월 총 합계 = Billing + 출고 완료 + 출고 확정 / "
-               "총 합계(미확정 포함) = 여기에 배송·픽업 대기를 더한 값 / 차이 = 총 합계 - 영업목표 / % = 총 합계 ÷ 영업목표. "
-               "각 오더는 상태에 따라 한 곳에만 집계되어 중복이 없습니다.")
+    st.caption("💡 각 오더는 상태에 따라 한 곳에만 집계되어 중복 없음.")
 
 
 # =============================================================
@@ -993,7 +1002,7 @@ if _VIEWER_PW and not st.session_state.get("viewer_ok", False):
 
 if IS_ADMIN:
     st.sidebar.header("📚 월별 히스토리 데이터 (영구 저장)")
-    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 덮어쓰기(업서트)됩니다. 나머지 월은 동결 보존됩니다.")
+    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 업서트. 나머지 월은 동결 보존.")
 
     masters_ready = all(os.path.exists(p) for p in [master_path, item_master_path, exclusion_path])
 
@@ -1062,7 +1071,7 @@ if IS_ADMIN:
 if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("⏱️ 당월 진척도 데이터")
-    st.sidebar.caption("'마감 여부' 컬럼이 포함된 오더 데이터. 업로드 시 전체 교체(스냅샷)되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제됩니다.")
+    st.sidebar.caption("업로드 시 전체 교체되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제")
 
     prog_target = st.sidebar.text_input("진척도 대상월 (YYYY-MM)", value=pd.Timestamp.today().strftime('%Y-%m'), key="prog_month")
     prog_file = st.sidebar.file_uploader("5. 당월 오더/출고 데이터", type=['xlsx', 'csv'], key="up_prog")
@@ -1091,7 +1100,7 @@ if IS_ADMIN:
 if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("🎯 월 목표 진척현황 데이터")
-    st.sidebar.caption("영업목표는 연 1회 등록(영구 보관). 빌링완료·빌링전 두 파일은 항상 같은 시점 자료를 함께 올려주세요.")
+    st.sidebar.caption("영업목표는 연 1회 등록. 빌링완료·빌링전 두 파일은 항상 같은 시점 자료 동시 업로드 필요.")
 
     goal_file = st.sidebar.file_uploader("6. 영업목표 (연 1회)", type=['xlsx', 'csv'], key="up_goal")
     if goal_file is not None and st.sidebar.button("✅ 영업목표 등록/교체", key="goal_btn"):
@@ -1112,32 +1121,52 @@ if IS_ADMIN:
         snap_date = st.date_input("기준일자", value=pd.Timestamp.today().date(), key="goal_snap_date")
     with sc2:
         snap_month_in = st.text_input("대상월", value=pd.Timestamp.today().strftime('%Y-%m'), key="goal_snap_month")
-    st.sidebar.caption("※ 대상월 = 이 데이터가 담고 있는 월(YYYY-MM). 월별로 보관되며 같은 달을 다시 올리면 그 달만 교체됩니다.")
+    st.sidebar.caption("※ 대상월 = 이 데이터가 담고 있는 월(YYYY-MM). 월별로 보관되며 같은 달 재업로드 시 그 달만 교체.")
     bill_file = st.sidebar.file_uploader("7. 빌링완료 데이터", type=['xlsx', 'csv'], key="up_bill")
-    pre_file = st.sidebar.file_uploader("8. 빌링전 데이터", type=['xlsx', 'csv'], key="up_pre")
-    if st.sidebar.button("✅ 빌링완료 + 빌링전 함께 반영", key="billpre_btn"):
+    pre_file = st.sidebar.file_uploader("8. 빌링전 데이터 (마감 시 생략 가능)", type=['xlsx', 'csv'], key="up_pre")
+    close_month = st.sidebar.checkbox("🔒 월 마감 반영 (빌링전 데이터 비움)", key="goal_close")
+
+    st.sidebar.caption("진행 중인 달은 두 파일을 같은 시점 자료로 동시 업로드. "
+                       "이미 끝난 달은 빌링완료만 올리고 체크박스. ")
+    if st.sidebar.button("✅ 선택한 대상월에 반영", key="billpre_btn"):
         tgt_m = parse_month(snap_month_in)
-        if bill_file is None or pre_file is None:
-            st.sidebar.warning("두 파일(빌링완료·빌링전)을 모두 올린 뒤 눌러주세요. 기준 시점이 어긋나면 중복 집계가 발생합니다.")
+        if bill_file is None and pre_file is None:
+            st.sidebar.warning("반영할 파일을 1개 이상 올려주세요.")
         elif not (isinstance(tgt_m, str) and re.fullmatch(r'\d{4}-\d{2}', tgt_m)):
             st.sidebar.error("대상월 형식이 올바르지 않습니다. 예: 2026-07")
+        elif (bill_file is not None) and (pre_file is None) and not close_month:
+            st.sidebar.warning("빌링전 데이터가 없습니다. 진행 중인 달이면 함께 올리고, "
+                               "마감된 달이면 '🔒 월 마감 반영'을 체크해주세요.")
         else:
+            ok, msgs = True, []
             try:
-                b = process_billing_upload(bill_file, tgt_m)
-                p = process_preship_upload(pre_file, tgt_m)
+                if bill_file is not None:
+                    b = process_billing_upload(bill_file, tgt_m)
+                    if b is None or b.empty:
+                        ok = False
+                        st.sidebar.error("빌링완료 파일에서 데이터를 읽지 못했습니다. 컬럼 위치(AM/AO/O/S)를 확인해주세요.")
+                    else:
+                        upsert_month_store(b, tgt_m, BILL_STORE, BILL_COLS, ['박스', '금액'])
+                        msgs.append("빌링완료")
+                if ok and pre_file is not None:
+                    p = process_preship_upload(pre_file, tgt_m)
+                    if p is None or p.empty:
+                        ok = False
+                        st.sidebar.error(f"빌링전 파일에서 '{PRESHIP_DOCTYPE}' 데이터를 찾지 못했습니다. 컬럼 위치를 확인해주세요.")
+                    else:
+                        upsert_month_store(p, tgt_m, PRE_STORE, PRE_COLS, ['박스', '금액'])
+                        msgs.append("빌링전")
+                if ok and close_month:
+                    _s = load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])
+                    save_store(_s[_s['기준월'] != tgt_m], PRE_STORE)
+                    msgs.append("빌링전 비움(마감)")
             except Exception as e:
-                b = p = None
+                ok = False
                 st.sidebar.error(f"파일 해석 실패: {e}")
-            if b is None or b.empty:
-                st.sidebar.error("빌링완료 파일에서 데이터를 읽지 못했습니다. 컬럼 위치(AM/AO/O/S)를 확인해주세요.")
-            elif p is None or p.empty:
-                st.sidebar.error(f"빌링전 파일에서 '{PRESHIP_DOCTYPE}' 데이터를 찾지 못했습니다. 컬럼 위치를 확인해주세요.")
-            else:
-                upsert_month_store(b, tgt_m, BILL_STORE, BILL_COLS, ['박스', '금액'])
-                upsert_month_store(p, tgt_m, PRE_STORE, PRE_COLS, ['박스', '금액'])
+            if ok:
                 save_meta('기준일자', snap_date)
                 save_meta('대상월', tgt_m)
-                st.sidebar.success(f"{tgt_m} 반영 완료 (기준일자 {snap_date}) — 다른 달 데이터는 그대로 보존됩니다.")
+                st.sidebar.success(f"{tgt_m} 반영 완료 [{' + '.join(msgs)}] — 다른 달 데이터는 그대로 보존됩니다.")
                 st.rerun()
 
 # --- 저장 현황 및 관리 ---
@@ -1199,11 +1228,11 @@ if IS_ADMIN:
 st.sidebar.divider()
 if IS_ADMIN:
     st.sidebar.header("⚙️ 마스터 데이터 관리")
-    st.sidebar.caption("최초 1회 업로드 시 시스템에 저장됨. 내용 갱신 필요 시 재업로드.")
+    st.sidebar.caption("1회 업로드 시 시스템에 저장됨. 내용 갱신 필요 시 재업로드.")
 
-    master_upload = st.sidebar.file_uploader("🔄 영업마스터 갱신 (선택)", type=['xlsx', 'csv'])
-    item_master_upload = st.sidebar.file_uploader("🔄 품목마스터 갱신 (선택)", type=['xlsx', 'csv'])
-    exclusion_upload = st.sidebar.file_uploader("🔄 제외 품목 리스트 갱신 (선택)", type=['xlsx', 'csv'])
+    master_upload = st.sidebar.file_uploader("🔄 영업마스터 갱신", type=['xlsx', 'csv'])
+    item_master_upload = st.sidebar.file_uploader("🔄 품목마스터 갱신", type=['xlsx', 'csv'])
+    exclusion_upload = st.sidebar.file_uploader("🔄 제외 품목 리스트 갱신", type=['xlsx', 'csv'])
 
     if master_upload:
         save_uploaded_file(master_upload, "master.xlsx")
@@ -1221,7 +1250,7 @@ exclusion_ready = os.path.exists(exclusion_path)
 
 if master_ready and item_master_ready and exclusion_ready:
     if IS_ADMIN:
-        st.sidebar.info("✅ 마스터 데이터 3종이 내장되어 정상 작동 중입니다.")
+        st.sidebar.info("✅ 마스터 데이터 3종 정상 작동 중.")
 elif IS_ADMIN:
     st.sidebar.warning("⚠️ 저장된 마스터 데이터가 없습니다. 위 ⚙️ 영역에 최초 1회 업로드 해주세요.")
 else:
@@ -1381,13 +1410,15 @@ def create_styled_pivot(df, index_cols, months_list, acc_mode='sum'):
     format_dict = build_format_dict(pivot.columns)
 
     styled_main = pivot.style.format(format_dict)
-    st.dataframe(styled_main, width='content', height=500, column_config=COMMON_COL_CONFIG)
+    _n = len(pivot.columns) + len(index_cols)
+    st.dataframe(styled_main, width=df_width(_n), height=500, column_config=col_cfg(_n))
 
     total_df = pd.DataFrame([totals], columns=pivot.columns, index=pd.Index([total_index_name], name=pivot.index.name))
     styled_total = total_df.style.format(format_dict).apply(
         lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
     )
-    st.dataframe(styled_total, width='content', column_config=COMMON_COL_CONFIG)
+    st.dataframe(styled_total, width=df_width(len(total_df.columns) + len(index_cols)),
+                 column_config=col_cfg(len(total_df.columns) + len(index_cols)))
 
 
 # 🎯 그룹별 월별 계획/실적/정확도/GAP 플랫 테이블 (정확도 = 품목별 정확도의 평균)
@@ -1420,14 +1451,30 @@ def build_flat_month_table(df, index_cols, months_list, include_qty=True):
     return out.reset_index(), months_present
 
 
+# 🎯 표 폭: 컬럼이 적으면 내용 폭에 맞추고, 많으면 화면 폭 기준(가로 스크롤)으로 전환
+#    ('content'는 컬럼이 많아지면 폭 계산이 어긋나 값 컬럼이 잘려 보이는 문제가 있음)
+WIDE_TABLE_COL_LIMIT = 9
+
+def df_width(ncols):
+    return 'content' if ncols <= WIDE_TABLE_COL_LIMIT else 'stretch'
+
+def col_cfg(ncols, base=None):
+    """컬럼이 많으면 고정 픽셀 폭을 해제한다.
+       (제품명 280px 등 라벨 컬럼이 폭을 선점해 값 컬럼이 화면 밖으로 밀려나는 문제 방지)"""
+    if ncols > WIDE_TABLE_COL_LIMIT:
+        return None
+    return base if base is not None else COMMON_COL_CONFIG
+
+
 def render_total_row(label_cols, value_cols, totals, table_key=None, col_config=None):
     total_df = pd.DataFrame([[('전체 합계/평균' if i == 0 else '') for i in range(len(label_cols))] + totals],
                             columns=label_cols + value_cols)
     styled = total_df.style.format(build_format_dict(value_cols)).apply(
         lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
     )
-    st.dataframe(styled, width='content', hide_index=True,
-                 column_config=col_config if col_config is not None else COMMON_COL_CONFIG)
+    n = len(label_cols) + len(value_cols)
+    st.dataframe(styled, width=df_width(n), hide_index=True,
+                 column_config=col_cfg(n, col_config))
 
 
 # 🎯 탭3 상단: 지점별 → 영업사원별 정확도/GAP 요약표 (지점 소계 + 전체 합계/평균)
@@ -1452,14 +1499,17 @@ def render_person_summary(df, months_list):
     if flat.empty:
         return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
 
-    flat['_평균정확도'] = flat[acc_cols].mean(axis=1)
-    br['_평균정확도'] = br[acc_cols].mean(axis=1)
+    # 🎯 정렬 기준: 가장 최근 월의 정확도(오름차순), 없으면 기간 평균으로 보조
+    last_acc = f"{mp[-1]} 정확도"
+    for t in (flat, br):
+        t['_평균정확도'] = t[acc_cols].mean(axis=1)
+        t['_정렬'] = t[last_acc].fillna(t['_평균정확도'])
 
     rows, subtotal_pos = [], []
-    br_sorted = br.sort_values('_평균정확도', na_position='last')  # 문제 지점이 위로
+    br_sorted = br.sort_values('_정렬', na_position='last')  # 문제 지점이 위로
     for _, brow in br_sorted.iterrows():
         b = brow['영업지점명']
-        ppl = flat[flat['영업지점명'] == b].sort_values('_평균정확도', na_position='last')
+        ppl = flat[flat['영업지점명'] == b].sort_values('_정렬', na_position='last')
         if ppl.empty:
             continue
         for _, prow in ppl.iterrows():
@@ -1480,7 +1530,8 @@ def render_person_summary(df, months_list):
 
     styled = result.style.format(build_format_dict(value_cols)).apply(highlight, axis=1)
     h = min(520, 37 * (len(result) + 1) + 12)
-    st.dataframe(styled, width='content', hide_index=True, height=h, column_config=COMMON_COL_CONFIG)
+    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                 column_config=col_cfg(len(result.columns)))
 
     # 전체 합계/평균: GAP = 사원 행 합계, 정확도 = 사원 행 정확도의 평균
     totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
@@ -1509,7 +1560,15 @@ def render_detail_table(df, index_cols, months_list):
     flat = flat[flat[qty_cols].fillna(0).sum(axis=1) != 0]
     if flat.empty:
         return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
-    flat['_평균정확도'] = flat[acc_cols].mean(axis=1)
+
+    # 🎯 정렬 기준: 가장 최근 월의 정확도(오름차순). 그 달 값이 없으면 기간 평균으로 보조 정렬
+    last_acc = f"{mp[-1]} 정확도"
+    def add_sort_key(t):
+        t['_정렬'] = t[last_acc]
+        t['_평균정확도'] = t[acc_cols].mean(axis=1)
+        t['_정렬'] = t['_정렬'].fillna(t['_평균정확도'])
+        return t
+    flat = add_sort_key(flat)
 
     rows, subtotal_pos = [], []
 
@@ -1517,12 +1576,12 @@ def render_detail_table(df, index_cols, months_list):
         # 제품 단위 소계 (정확도는 제품 총량 기준 → 탭1과 동일한 수치)
         sub, _ = build_flat_month_table(df, prod_cols, months_list, include_qty=True)
         sub = sub[sub[qty_cols].fillna(0).sum(axis=1) != 0]
-        sub['_평균정확도'] = sub[acc_cols].mean(axis=1)
-        sub = sub.sort_values('_평균정확도', na_position='last')  # 정확도 낮은 제품이 위로
+        sub = add_sort_key(sub)
+        sub = sub.sort_values('_정렬', na_position='last')  # 최근 월 정확도 낮은 제품이 위로
 
         for _, srow in sub.iterrows():
             key_mask = np.logical_and.reduce([(flat[c] == srow[c]).values for c in prod_cols])
-            block = flat[key_mask].sort_values('_평균정확도', na_position='last')
+            block = flat[key_mask].sort_values('_정렬', na_position='last')
             if block.empty:
                 continue
             for _, r in block.iterrows():
@@ -1532,7 +1591,7 @@ def render_detail_table(df, index_cols, months_list):
             subtotal_pos.append(len(rows) - 1)
         result = pd.DataFrame(rows, columns=ordered + value_cols)
     else:
-        result = flat.sort_values('_평균정확도', na_position='last')[ordered + value_cols].reset_index(drop=True)
+        result = flat.sort_values('_정렬', na_position='last')[ordered + value_cols].reset_index(drop=True)
 
     if result.empty:
         return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
@@ -1544,7 +1603,8 @@ def render_detail_table(df, index_cols, months_list):
 
     styled = result.style.format(build_format_dict(value_cols)).apply(highlight, axis=1)
     h = min(520, 37 * (len(result) + 1) + 12)
-    st.dataframe(styled, width='content', hide_index=True, height=h, column_config=COMMON_COL_CONFIG)
+    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                 column_config=col_cfg(len(result.columns)))
 
     # 전체 합계/평균: 세부(leaf) 행 기준 (소계 행 중복 합산 방지)
     totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
@@ -1596,9 +1656,7 @@ def render_improvement_tab(df, available_months):
 
     st.caption(f"💡 정확도 = 사원(지점)별 품목별 정확도의 평균 / GAP = 총 계획 - 총 실적. "
                f"정확도 개선 = {month} 정확도 - {pm} 정확도 (%p), GAP 개선 = {pm} GAP - {month} GAP. "
-               "정렬: 지점은 기준월 정확도 내림차순, 지점 내 사원은 정확도 개선 내림차순. "
-               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. "
-               "하단 전체 평균은 사원 기준(사원 1명=1표)과 지점 기준(지점 소계의 평균, 지점 1개=1표)을 함께 표시합니다.")
+               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. ")
 
     flat, mp = build_flat_month_table(df, ['영업지점명', '영업사원명'], [pm, month], include_qty=False)
     if flat is None or len(mp) < 2:
@@ -1655,7 +1713,8 @@ def render_improvement_tab(df, available_months):
 
     styled = result.style.format(fmt).apply(highlight, axis=1)
     h = min(560, 37 * (len(result) + 1) + 12)
-    st.dataframe(styled, width='content', hide_index=True, height=h, column_config=COMMON_COL_CONFIG)
+    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                 column_config=col_cfg(len(result.columns)))
 
     # 전체 평균: 두 가지 기준을 모두 표시
     # ① 사원 기준 = 표의 사원 행 전체 평균 (사원 1명 = 1표)
@@ -1673,7 +1732,8 @@ def render_improvement_tab(df, available_months):
     styled_total = total_df.style.format(fmt).apply(
         lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
     )
-    st.dataframe(styled_total, width='content', hide_index=True, column_config=COMMON_COL_CONFIG)
+    st.dataframe(styled_total, width=df_width(len(total_df.columns)), hide_index=True,
+                 column_config=col_cfg(len(total_df.columns)))
 
 
 # =============================================================
@@ -1709,8 +1769,8 @@ def render_progress_tab():
     default_sel = [s for s in statuses if '확정' in s and (mnum and f"{mnum}월" in s)]
     if not default_sel:
         default_sel = [s for s in statuses if '확정' in s] or statuses
-    sel_status = st.multiselect("✅ 집계에 포함할 '마감 여부' 상태", statuses, default=default_sel)
-    st.caption("💡 기본값(해당월 출고 확정)은 확정 오더 기준 실적입니다. '출고 미확정' 등을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량이 됩니다.")
+    sel_status = st.multiselect("✅ 집계에 포함할 오더 상태", statuses, default=default_sel)
+    st.caption("💡 기본값은 확정 오더 기준 실적. '출고 미확정' 을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량.")
     if not sel_status:
         return st.warning("집계할 마감 여부 상태를 1개 이상 선택해주세요.")
 
@@ -1764,7 +1824,8 @@ def render_progress_tab():
 
     h1 = min(520, 37 * (len(prod_disp) + 1) + 12)
     st.dataframe(prod_disp.style.format(build_format_dict(fmt_cols)).apply(highlight_prod, axis=1),
-                 width='content', hide_index=True, height=h1, column_config=PROG_TABLE_CONFIG)
+                 width=df_width(len(prod_disp.columns)), hide_index=True, height=h1,
+                 column_config=col_cfg(len(prod_disp.columns), PROG_TABLE_CONFIG))
     t_plan, t_act = prod['계획수량'].sum(), prod['실적수량'].sum()
     render_total_row(['제품코드', '제품명'], fmt_cols,
                      [t_plan, t_act, compute_progress(t_plan, t_act), t_plan - t_act],
@@ -1782,7 +1843,7 @@ def render_progress_tab():
     if low_df.empty:
         st.info("조건에 해당하는 품목이 없습니다.")
         return
-    st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞)입니다.")
+    st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞).")
 
     org_cols = ['영업부명', '영업지점명', '영업사원명']
     detail = low_df.groupby(['제품코드', '제품명'] + org_cols, as_index=False)[['계획수량', '실적수량']].sum()
@@ -1821,7 +1882,8 @@ def render_progress_tab():
 
     styled = result.style.format(build_format_dict(fmt_cols)).apply(highlight, axis=1)
     h2 = min(520, 37 * (len(result) + 1) + 12)
-    st.dataframe(styled, width='content', hide_index=True, height=h2, column_config=PROG_TABLE_CONFIG)
+    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h2,
+                 column_config=col_cfg(len(result.columns), PROG_TABLE_CONFIG))
     d_plan, d_act = detail['계획수량'].sum(), detail['실적수량'].sum()
     render_total_row(label_cols, fmt_cols,
                      [d_plan, d_act, compute_progress(d_plan, d_act), d_plan - d_act],
@@ -1830,8 +1892,8 @@ def render_progress_tab():
     # --- ③ 선택 품목의 지점·사원별 GAP ---
     st.markdown("---")
     st.markdown("##### ③ 선택 품목 기준 지점 · 영업사원별 GAP (GAP 큰 순)")
-    st.caption("💡 위 ②에서 지정한 진척도 조건에 걸린 품목들만 집계한 GAP입니다. GAP = 계획 - 실적 (양수 = 미달). "
-               "②에 리스트업된 제품 중 진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외했습니다.")
+    st.caption("💡 위 ②에서 지정한 조건에 걸린 품목들만 집계한 GAP. (양수 = 미달). "
+               "진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외.")
     gap_df = merged[merged['제품코드'].isin(low_codes)]  # ∞ 품목 제외 (유한 진척도 품목만)
     if gap_df.empty:
         return st.info("GAP 집계 대상 품목이 없습니다. (∞ 품목 제외 기준)")
@@ -1859,7 +1921,8 @@ def render_progress_tab():
 
     styled3 = result3.style.format(build_format_dict(g_cols)).apply(highlight3, axis=1)
     h3 = min(520, 37 * (len(result3) + 1) + 12)
-    st.dataframe(styled3, width='content', hide_index=True, height=h3, column_config=PROG_TABLE_CONFIG)
+    st.dataframe(styled3, width=df_width(len(result3.columns)), hide_index=True, height=h3,
+                 column_config=col_cfg(len(result3.columns), PROG_TABLE_CONFIG))
     render_total_row(['영업지점명', '영업사원명'], g_cols,
                      [pg['계획수량'].sum(), pg['실적수량'].sum(), pg['계획수량'].sum() - pg['실적수량'].sum()],
                      col_config=PROG_TABLE_CONFIG)
@@ -1916,7 +1979,7 @@ if master_ready and item_master_ready and exclusion_ready:
             sel_countries = st.multiselect("🌍 국가 포함", all_countries, default=all_countries)
         with col2:
             all_codes = sorted(raw_df['제품코드'].unique())
-            exclude_codes = st.multiselect("❌ 제외할 제품코드/품목 (화면 임시 제외)", all_codes, default=[])
+            exclude_codes = st.multiselect("❌ 제외할 제품코드/품목", all_codes, default=[])
 
         filtered_df = raw_df[
             (raw_df['기준월'].isin(selected_months)) &
@@ -1936,7 +1999,7 @@ if master_ready and item_master_ready and exclusion_ready:
             create_styled_pivot(filtered_df, ['영업부명', '영업지점명'], selected_months, acc_mode='item_avg')
 
         with tab3:
-            st.markdown("##### 영업부/지점/사원을 좁혀가며, 문제 품목과 담당자를 딥다이브 하세요.")
+            st.markdown("##### 영업부/지점/사원을 좁혀가며, 이슈를 딥다이브.")
             # 🎯 [추가됨] 평가 제외 조직(EVAL_EXCLUDE_ORGS)은 상세 분석에서 제외
             t3_base = filtered_df[
                 (~filtered_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
@@ -1968,7 +2031,7 @@ if master_ready and item_master_ready and exclusion_ready:
                 )
             with d_col2:
                 acc_threshold = st.number_input(
-                    "정확도 하위 필터 (기간 평균 %가 이 값 미만인 품목만, 100=전체)",
+                    "정확도 하위 필터 (100=전체)",
                     min_value=0, max_value=100, value=100, step=5
                 )
 
@@ -1977,17 +2040,17 @@ if master_ready and item_master_ready and exclusion_ready:
 
             st.markdown("---")
             st.markdown("##### 👥 지점별 · 영업사원별 정확도/GAP 요약")
-            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준이며, 사원 드롭다운과 무관하게 선택 지점 내 전체 사원을 비교합니다. 품목 필터를 걸면 '그 품목들에 대해 누가 문제인지' 바로 보입니다. 정렬: 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균(사원 1명=1표).")
+            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준. 품목 필터를 걸면 '그 품목들에 대해 어디가 이슈인지' 분석. 정렬: 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균.")
             render_person_summary(summary_base, selected_months)
 
             st.markdown("---")
             st.markdown("##### 📋 상세 테이블 (제품 소계 + 정확도 오름차순)")
             dynamic_rows = st.multiselect(
-                "📌 행(Row)으로 볼 항목을 배치하세요. (제품코드/제품명 포함 시 제품 소계가 자동 표시됩니다)",
+                "📌 행(Row)으로 볼 항목을 배치하세요.",
                 ['제품코드', '제품명', '영업부명', '영업지점명', '영업사원명', '국가'],
                 default=['제품코드', '제품명', '영업사원명']
             )
-            st.caption("💡 정확도 = 해당 행의 품목별 정확도 평균 / 📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). 정렬은 기간 평균 정확도 오름차순(문제 품목·행이 맨 위)입니다. 하단 전체 평균 = 표시된 세부 행들의 평균(세부 행 1개=1표)이라, 행 구성에 따라 위 요약표의 사원 기준 평균과 다를 수 있습니다.")
+            st.caption("💡 정확도 = 해당 행의 품목별 정확도 평균 / 📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). 정렬은 최근 월의 정확도 오름차순. 하단 전체 평균 = 표시된 세부 행들의 평균이라, 위 요약표의 사원 기준 평균과 다를 수 있음.")
 
             if dynamic_rows:
                 render_detail_table(t3_filtered, dynamic_rows, selected_months)
@@ -2007,7 +2070,7 @@ if master_ready and item_master_ready and exclusion_ready:
             render_improvement_tab(imp_base, available_months)
 
     with tab5:
-        st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검용)")
+        st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검)")
         render_progress_tab()
 
     with tab6:
@@ -2015,4 +2078,4 @@ if master_ready and item_master_ready and exclusion_ready:
         render_goal_tab()
 
 else:
-    st.info("하단 ⚙️ 마스터 데이터 3종을 먼저 등록해주세요. 등록 후 좌측 📚 영역에서 계획/실적을 히스토리에 반영하면, 재업로드 없이 항상 대시보드가 표시됩니다.")
+    st.info("하단 ⚙️ 마스터 데이터 3종을 먼저 등록. 등록 후 좌측 📚 영역에서 계획/실적을 히스토리에 반영하면, 재업로드 없이 대시보드 표시됨")
