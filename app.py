@@ -27,8 +27,14 @@ def _get_secret(name, default=""):
     except Exception:
         return default
 
+def _as_bool(v):
+    """true/false를 불리언·문자열 어느 쪽으로 적어도 올바르게 해석"""
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ('true', '1', 'yes', 'y', 'on')
+
 _VIEWER_PW = _get_secret("VIEWER_PASSWORD")
-_READ_ONLY = bool(_get_secret("READ_ONLY", False))
+_READ_ONLY = _as_bool(_get_secret("READ_ONLY", False))
 IS_ADMIN = not _READ_ONLY   # READ_ONLY=true → 조회 전용
 
 st.set_page_config(
@@ -136,14 +142,17 @@ PRODUCT_MAPPING = {
 # =============================================================
 # [실적] (대상월, 원래코드): 통합코드 — 해당 월에 한해 원래코드의 '실적'을 통합코드로 합산
 MONTHLY_ACTUAL_MERGE = {
-    ('2026-07', '101070105'): '101004224',   # 신라면 KDH 실적 → 신라면(기존). 7월 KDH 포장재 결품 대응
+    ('2026-07', '101070105'): '101004224',   # 신라면 16(4x4) KDH 실적 → 신라면 레귤러. 7월 KDH 포장재 결품 대응
+    ('2026-07', '101070106'): '101003648',   # 신라면 18클럽 KDH 실적 → 18클럽 레귤러. 7월 부자재 결품 대응
 }
 # [계획] (대상월, 원래코드): (통합코드, 모드) — 해당 월에 한해 원래코드의 '계획' 처리
+#   'merge'  : 원래코드 계획을 조건 없이 통합코드로 전부 합산 (레귤러+KDH에 물량을 쪼개 입력한 경우)
 #   'dedupe' : 같은 거래처에 통합코드 계획이 이미 있으면 원래코드 계획 삭제(이중 입력 제거),
 #              통합코드 계획이 없는 거래처는 원래코드 계획을 통합코드로 이관(성실 입력 사원 보호)
 #   'drop'   : 해당 월 원래코드 계획을 전부 삭제
 MONTHLY_PLAN_MERGE = {
-    ('2026-07', '101070105'): ('101004224', 'dedupe'),
+    ('2026-07', '101070105'): ('101004224', 'dedupe'),   # 신라면 16(4x4) KDH → 신라면 레귤러
+    ('2026-07', '101070106'): ('101003648', 'merge'),    # 신라면 18클럽 KDH → 18클럽 레귤러 (전량 합산)
 }
 # [제외] 코드: 시작월 — 해당 월부터(이후 계속) 분석에서 제외. 시작월 이전 과거 데이터/정확도는 그대로 유지
 MONTHLY_EXCLUSIONS = {
@@ -176,6 +185,8 @@ def apply_period_rules(df, kind):
                 continue
             if mode == 'drop':
                 df = df[~src_mask]
+            elif mode == 'merge':
+                df.loc[src_mask, '제품코드'] = dst      # 조건 없이 전부 합산
             else:  # 'dedupe'
                 dst_customers = set(df[(df['기준월'] == m) & (df['제품코드'] == dst)]['거래처 코드'])
                 dup_mask = src_mask & df['거래처 코드'].isin(dst_customers)
@@ -279,6 +290,33 @@ def load_master_lookup(master_mtime):
     master_lookup = master_df[['거래처 코드', '영업부명', '영업지점명', '영업사원명']].drop_duplicates(subset=['거래처 코드'])
     master_lookup['거래처 코드'] = clean_code(master_lookup['거래처 코드'])
     return master_lookup
+
+# 🎯 [추가됨] 영업마스터에서 거래처명 조회 (컬럼명이 파일마다 달라 후보를 순서대로 탐색)
+CUSTOMER_NAME_CANDIDATES = ['거래처명', 'sold-to party name', 'customer name', 'name 1', 'name1',
+                            'name', 'sold-to name', '거래처 명']
+
+@st.cache_data
+def load_customer_names(master_mtime):
+    try:
+        m = normalize_cols(pd.read_excel(master_path))
+    except Exception:
+        return {}
+    m = m.rename(columns={'sold-to party': '거래처 코드'})
+    if '거래처 코드' not in m.columns:
+        return {}
+    name_col = next((c for c in CUSTOMER_NAME_CANDIDATES if c in m.columns), None)
+    if name_col is None:
+        # 후보에 없으면 '이름/name'이 포함된 컬럼 중 조직명 컬럼이 아닌 것을 사용
+        skip = {'영업부명', '영업지점명', '영업사원명', 'sales org. name',
+                'sales group name', 'sales person name', 'sales preson name'}
+        cands = [c for c in m.columns if ('name' in c or '명' in c) and c not in skip]
+        name_col = cands[0] if cands else None
+    if name_col is None:
+        return {}
+    m['거래처 코드'] = clean_code(m['거래처 코드'])
+    m = m[['거래처 코드', name_col]].dropna().drop_duplicates(subset=['거래처 코드'])
+    return dict(zip(m['거래처 코드'].astype(str), m[name_col].astype(str)))
+
 
 @st.cache_data
 def load_item_info_and_dropcodes(item_mtime, exc_mtime):
@@ -815,7 +853,9 @@ def render_goal_tab():
         month = st.selectbox("📅 대상월", months, index=default_idx, key="goal_month")
     with c2:
         st.caption(f"📌 보유 빌링 데이터: **{', '.join(data_months) if data_months else '없음'}** / 기준일자: **{snap or '미등록'}** — "
-                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료를 함께 올려주세요. 금액 단위 USD. ")
+                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료를 함께 올려주세요. 금액 단위 USD. "
+                   "주차는 월요일 시작이며 월 경계(1일·말일)에서 잘립니다. 라벨은 각 구간의 시작일 기준이라 "
+                   "월초·월말의 짧은 조각 주는 그 조각의 첫날로 표기됩니다.")
 
     # 🎯 선택한 달의 데이터만 사용 (월별 히스토리에서 추출)
     bill = bill[bill['기준월'] == month].copy()
@@ -930,7 +970,7 @@ def render_goal_tab():
             base = base.drop(columns=[bx, am])
     hidden_n = len(weeks) - len(kept_weeks)
     if hidden_n:
-        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개는 숨김처리 완료 "
+        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개는 숨겼습니다 "
                    "(해당 주차 오더는 이미 Billing 완료·출고 완료에 반영됨).")
 
     # --- 행 구성: 영업부별 지점 → 영업부 합계 → 총 합계 ---
@@ -981,7 +1021,10 @@ def render_goal_tab():
 
     st.markdown(build_goal_html(body, spec, week_specs, mm), unsafe_allow_html=True)
 
-    st.caption("💡 각 오더는 상태에 따라 한 곳에만 집계되어 중복 없음.")
+    st.caption("💡 Billing % = Billing 금액 ÷ 영업목표 / Billing+출고 % = (Billing + 출고 완료) ÷ 영업목표 / "
+               f"{mm}월 출고 확정 합계 = 주차별 확정의 합 / {mm}월 총 합계 = Billing + 출고 완료 + 출고 확정 / "
+               "총 합계(미확정 포함) = 여기에 배송·픽업 대기를 더한 값 / 차이 = 총 합계 - 영업목표 / % = 총 합계 ÷ 영업목표. "
+               "각 오더는 상태에 따라 한 곳에만 집계되어 중복이 없습니다.")
 
 
 # =============================================================
@@ -1002,7 +1045,7 @@ if _VIEWER_PW and not st.session_state.get("viewer_ok", False):
 
 if IS_ADMIN:
     st.sidebar.header("📚 월별 히스토리 데이터 (영구 저장)")
-    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 업서트. 나머지 월은 동결 보존.")
+    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 덮어쓰기(업서트)됩니다. 나머지 월은 동결 보존됩니다.")
 
     masters_ready = all(os.path.exists(p) for p in [master_path, item_master_path, exclusion_path])
 
@@ -1071,7 +1114,7 @@ if IS_ADMIN:
 if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("⏱️ 당월 진척도 데이터")
-    st.sidebar.caption("업로드 시 전체 교체되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제")
+    st.sidebar.caption("'마감 여부' 컬럼이 포함된 오더 데이터. 업로드 시 전체 교체(스냅샷)되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제됩니다.")
 
     prog_target = st.sidebar.text_input("진척도 대상월 (YYYY-MM)", value=pd.Timestamp.today().strftime('%Y-%m'), key="prog_month")
     prog_file = st.sidebar.file_uploader("5. 당월 오더/출고 데이터", type=['xlsx', 'csv'], key="up_prog")
@@ -1100,7 +1143,7 @@ if IS_ADMIN:
 if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("🎯 월 목표 진척현황 데이터")
-    st.sidebar.caption("영업목표는 연 1회 등록. 빌링완료·빌링전 두 파일은 항상 같은 시점 자료 동시 업로드 필요.")
+    st.sidebar.caption("영업목표는 연 1회 등록(영구 보관). 빌링완료·빌링전 두 파일은 항상 같은 시점 자료를 함께 올려주세요.")
 
     goal_file = st.sidebar.file_uploader("6. 영업목표 (연 1회)", type=['xlsx', 'csv'], key="up_goal")
     if goal_file is not None and st.sidebar.button("✅ 영업목표 등록/교체", key="goal_btn"):
@@ -1121,13 +1164,14 @@ if IS_ADMIN:
         snap_date = st.date_input("기준일자", value=pd.Timestamp.today().date(), key="goal_snap_date")
     with sc2:
         snap_month_in = st.text_input("대상월", value=pd.Timestamp.today().strftime('%Y-%m'), key="goal_snap_month")
-    st.sidebar.caption("※ 대상월 = 이 데이터가 담고 있는 월(YYYY-MM). 월별로 보관되며 같은 달 재업로드 시 그 달만 교체.")
+    st.sidebar.caption("※ 대상월 = 이 데이터가 담고 있는 월(YYYY-MM). 월별로 보관되며 같은 달을 다시 올리면 그 달만 교체됩니다.")
     bill_file = st.sidebar.file_uploader("7. 빌링완료 데이터", type=['xlsx', 'csv'], key="up_bill")
-    pre_file = st.sidebar.file_uploader("8. 빌링전 데이터 (마감 시 생략 가능)", type=['xlsx', 'csv'], key="up_pre")
-    close_month = st.sidebar.checkbox("🔒 월 마감 반영 (빌링전 데이터 비움)", key="goal_close")
+    pre_file = st.sidebar.file_uploader("8. 빌링전 데이터 (마감월은 생략 가능)", type=['xlsx', 'csv'], key="up_pre")
+    close_month = st.sidebar.checkbox("🔒 월 마감 반영 (이 달의 빌링전 데이터를 비움)", key="goal_close")
 
-    st.sidebar.caption("진행 중인 달은 두 파일을 같은 시점 자료로 동시 업로드. "
-                       "이미 끝난 달은 빌링완료만 올리고 체크박스. ")
+    st.sidebar.caption("진행 중인 달은 두 파일을 같은 시점 자료로 함께 올리세요. "
+                       "이미 끝난 달(마감)은 빌링완료만 올리고 위 체크박스를 켜면 됩니다. "
+                       "현재 시점의 빌링전 데이터에는 지난달 건이 남아있지 않기 때문입니다.")
     if st.sidebar.button("✅ 선택한 대상월에 반영", key="billpre_btn"):
         tgt_m = parse_month(snap_month_in)
         if bill_file is None and pre_file is None:
@@ -1228,11 +1272,11 @@ if IS_ADMIN:
 st.sidebar.divider()
 if IS_ADMIN:
     st.sidebar.header("⚙️ 마스터 데이터 관리")
-    st.sidebar.caption("1회 업로드 시 시스템에 저장됨. 내용 갱신 필요 시 재업로드.")
+    st.sidebar.caption("최초 1회 업로드 시 시스템에 저장됨. 내용 갱신 필요 시 재업로드.")
 
-    master_upload = st.sidebar.file_uploader("🔄 영업마스터 갱신", type=['xlsx', 'csv'])
-    item_master_upload = st.sidebar.file_uploader("🔄 품목마스터 갱신", type=['xlsx', 'csv'])
-    exclusion_upload = st.sidebar.file_uploader("🔄 제외 품목 리스트 갱신", type=['xlsx', 'csv'])
+    master_upload = st.sidebar.file_uploader("🔄 영업마스터 갱신 (선택)", type=['xlsx', 'csv'])
+    item_master_upload = st.sidebar.file_uploader("🔄 품목마스터 갱신 (선택)", type=['xlsx', 'csv'])
+    exclusion_upload = st.sidebar.file_uploader("🔄 제외 품목 리스트 갱신 (선택)", type=['xlsx', 'csv'])
 
     if master_upload:
         save_uploaded_file(master_upload, "master.xlsx")
@@ -1250,7 +1294,7 @@ exclusion_ready = os.path.exists(exclusion_path)
 
 if master_ready and item_master_ready and exclusion_ready:
     if IS_ADMIN:
-        st.sidebar.info("✅ 마스터 데이터 3종 정상 작동 중.")
+        st.sidebar.info("✅ 마스터 데이터 3종이 내장되어 정상 작동 중입니다.")
 elif IS_ADMIN:
     st.sidebar.warning("⚠️ 저장된 마스터 데이터가 없습니다. 위 ⚙️ 영역에 최초 1회 업로드 해주세요.")
 else:
@@ -1538,8 +1582,55 @@ def render_person_summary(df, months_list):
     render_total_row(label_cols, value_cols, totals)
 
 
+# 🎯 [추가됨] 상세 테이블 행 클릭 → 해당 제품/지점/사원의 거래처별 계획·실적 내역
+def build_customer_breakdown(df, months_list, code, branch=None, person=None):
+    d = df[(df['제품코드'] == code) & (df['기준월'].isin(months_list))]
+    if branch is not None:
+        d = d[d['영업지점명'] == branch]
+    if person is not None:
+        d = d[d['영업사원명'] == person]
+    if d.empty:
+        return None, []
+    return build_flat_month_table(d, ['거래처 코드'], months_list, include_qty=True)
+
+
+def render_customer_detail(df, months_list, code, pname, branch, person):
+    title = f"{code} {pname}"
+    scope = ' · '.join([x for x in [branch, person] if x])
+    st.markdown(f"##### 🧾 거래처별 내역 — {title}")
+    st.caption(f"범위: {scope if scope else '해당 제품 전체'} / 기간: {months_list[0]} ~ {months_list[-1]}")
+
+    flat, mp = build_customer_breakdown(df, months_list, code, branch, person)
+    if flat is None:
+        st.info("표시할 거래처 데이터가 없습니다.")
+        return
+    vcols = []
+    for m in mp:
+        vcols.extend([f"{m} 계획", f"{m} 실적", f"{m} 정확도", f"{m} GAP"])
+    qty = [c for c in vcols if c.endswith('계획') or c.endswith('실적')]
+    flat = flat[flat[qty].fillna(0).sum(axis=1) != 0]
+    if flat.empty:
+        st.info("표시할 거래처 데이터가 없습니다.")
+        return
+    flat = flat.sort_values(f"{mp[-1]} 정확도", na_position='last')
+
+    # 🎯 거래처명 표시 (영업마스터에서 조회, 없으면 코드만)
+    names = load_customer_names(file_mtime(master_path))
+    label_cols = ['거래처 코드']
+    if names:
+        flat['거래처명'] = flat['거래처 코드'].astype(str).map(names).fillna('(이름 없음)')
+        label_cols = ['거래처명', '거래처 코드']
+    res = flat[label_cols + vcols].reset_index(drop=True)
+    h = min(460, 37 * (len(res) + 1) + 12)
+    st.dataframe(res.style.format(build_format_dict(vcols)),
+                 width=df_width(len(res.columns)), hide_index=True, height=h)
+    totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in vcols]
+    render_total_row(label_cols, vcols, totals)
+
+
 # 🎯 탭3 메인: 제품 소계 행 + 정확도 오름차순 정렬 상세 테이블
-def render_detail_table(df, index_cols, months_list):
+def render_detail_table(df, index_cols, months_list, sort_month=None):
+    """sort_month: 품목 정렬 기준월 (None이면 조회 기간 중 가장 최근 월)"""
     if df.empty:
         return st.warning("해당 조건에 맞는 데이터가 없습니다.")
 
@@ -1561,8 +1652,10 @@ def render_detail_table(df, index_cols, months_list):
     if flat.empty:
         return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
 
-    # 🎯 정렬 기준: 가장 최근 월의 정확도(오름차순). 그 달 값이 없으면 기간 평균으로 보조 정렬
-    last_acc = f"{mp[-1]} 정확도"
+    # 🎯 정렬 기준: 지정한 기준월(없으면 조회 기간 중 가장 최근 월)의 정확도 오름차순.
+    #    그 달에 값이 없는 행은 기간 평균으로 보조 정렬
+    sm = sort_month if (sort_month in mp) else mp[-1]
+    last_acc = f"{sm} 정확도"
     def add_sort_key(t):
         t['_정렬'] = t[last_acc]
         t['_평균정확도'] = t[acc_cols].mean(axis=1)
@@ -1603,12 +1696,37 @@ def render_detail_table(df, index_cols, months_list):
 
     styled = result.style.format(build_format_dict(value_cols)).apply(highlight, axis=1)
     h = min(520, 37 * (len(result) + 1) + 12)
-    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
-                 column_config=col_cfg(len(result.columns)))
+    # 🎯 행을 클릭하면 그 행의 거래처별 내역이 팝업으로 열림
+    ev = st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                      column_config=col_cfg(len(result.columns)),
+                      on_select="rerun", selection_mode="single-row", key="t3_detail_table")
 
     # 전체 합계/평균: 세부(leaf) 행 기준 (소계 행 중복 합산 방지)
     totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
     render_total_row(ordered, value_cols, totals)
+
+    # --- 선택된 행 → 거래처별 상세 ---
+    try:
+        picked = list(ev.selection.rows)
+    except Exception:
+        picked = []
+    if picked and picked[0] < len(result):
+        r = result.iloc[picked[0]]
+        code = r.get('제품코드', '')
+        pname = r.get('제품명', '')
+        b = r.get('영업지점명', '')
+        p = r.get('영업사원명', '')
+        is_sub = (str(b) == '📍 제품 소계') or (str(p) == '📍 제품 소계')
+        branch = None if (is_sub or not str(b).strip()) else b
+        person = None if (is_sub or not str(p).strip()) else p
+        if hasattr(st, 'dialog'):
+            @st.dialog("거래처별 상세 내역", width="large")
+            def _show():
+                render_customer_detail(df, months_list, code, pname, branch, person)
+            _show()
+        else:
+            with st.expander("🧾 거래처별 상세 내역", expanded=True):
+                render_customer_detail(df, months_list, code, pname, branch, person)
 
 
 # 🎯 탭3 딥다이브 필터: 키워드 검색 + 정확도 하위 품목 필터
@@ -1656,7 +1774,9 @@ def render_improvement_tab(df, available_months):
 
     st.caption(f"💡 정확도 = 사원(지점)별 품목별 정확도의 평균 / GAP = 총 계획 - 총 실적. "
                f"정확도 개선 = {month} 정확도 - {pm} 정확도 (%p), GAP 개선 = {pm} GAP - {month} GAP. "
-               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. ")
+               "정렬: 지점은 기준월 정확도 내림차순, 지점 내 사원은 정확도 개선 내림차순. "
+               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. "
+               "하단 전체 평균은 사원 기준(사원 1명=1표)과 지점 기준(지점 소계의 평균, 지점 1개=1표)을 함께 표시합니다.")
 
     flat, mp = build_flat_month_table(df, ['영업지점명', '영업사원명'], [pm, month], include_qty=False)
     if flat is None or len(mp) < 2:
@@ -1769,8 +1889,8 @@ def render_progress_tab():
     default_sel = [s for s in statuses if '확정' in s and (mnum and f"{mnum}월" in s)]
     if not default_sel:
         default_sel = [s for s in statuses if '확정' in s] or statuses
-    sel_status = st.multiselect("✅ 집계에 포함할 오더 상태", statuses, default=default_sel)
-    st.caption("💡 기본값은 확정 오더 기준 실적. '출고 미확정' 을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량.")
+    sel_status = st.multiselect("✅ 집계에 포함할 '마감 여부' 상태", statuses, default=default_sel)
+    st.caption("💡 기본값(해당월 출고 확정)은 확정 오더 기준 실적입니다. '출고 미확정' 등을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량이 됩니다.")
     if not sel_status:
         return st.warning("집계할 마감 여부 상태를 1개 이상 선택해주세요.")
 
@@ -1843,7 +1963,7 @@ def render_progress_tab():
     if low_df.empty:
         st.info("조건에 해당하는 품목이 없습니다.")
         return
-    st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞).")
+    st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞)입니다.")
 
     org_cols = ['영업부명', '영업지점명', '영업사원명']
     detail = low_df.groupby(['제품코드', '제품명'] + org_cols, as_index=False)[['계획수량', '실적수량']].sum()
@@ -1892,8 +2012,8 @@ def render_progress_tab():
     # --- ③ 선택 품목의 지점·사원별 GAP ---
     st.markdown("---")
     st.markdown("##### ③ 선택 품목 기준 지점 · 영업사원별 GAP (GAP 큰 순)")
-    st.caption("💡 위 ②에서 지정한 조건에 걸린 품목들만 집계한 GAP. (양수 = 미달). "
-               "진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외.")
+    st.caption("💡 위 ②에서 지정한 진척도 조건에 걸린 품목들만 집계한 GAP입니다. GAP = 계획 - 실적 (양수 = 미달). "
+               "②에 리스트업된 제품 중 진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외했습니다.")
     gap_df = merged[merged['제품코드'].isin(low_codes)]  # ∞ 품목 제외 (유한 진척도 품목만)
     if gap_df.empty:
         return st.info("GAP 집계 대상 품목이 없습니다. (∞ 품목 제외 기준)")
@@ -1959,10 +2079,13 @@ if master_ready and item_master_ready and exclusion_ready:
 
         available_months = sorted([m for m in raw_df['기준월'].unique() if pd.notna(m) and str(m).strip() != ''])
         if len(available_months) >= 2:
+            # 🎯 보유 월 목록이 바뀌면 키가 달라져 슬라이더가 전체 범위로 자동 재설정됨
+            #    (키가 없으면 이전 세션의 선택 범위가 남아 새로 추가된 월이 안 보이는 문제)
             start_month, end_month = st.select_slider(
                 "📅 조회할 월(Month) 범위를 지정하세요",
                 options=available_months,
-                value=(available_months[0], available_months[-1])
+                value=(available_months[0], available_months[-1]),
+                key=f"month_range_{available_months[0]}_{available_months[-1]}_{len(available_months)}"
             )
         elif len(available_months) == 1:
             start_month = end_month = available_months[0]
@@ -1979,7 +2102,7 @@ if master_ready and item_master_ready and exclusion_ready:
             sel_countries = st.multiselect("🌍 국가 포함", all_countries, default=all_countries)
         with col2:
             all_codes = sorted(raw_df['제품코드'].unique())
-            exclude_codes = st.multiselect("❌ 제외할 제품코드/품목", all_codes, default=[])
+            exclude_codes = st.multiselect("❌ 제외할 제품코드/품목 (화면 임시 제외)", all_codes, default=[])
 
         filtered_df = raw_df[
             (raw_df['기준월'].isin(selected_months)) &
@@ -1999,7 +2122,7 @@ if master_ready and item_master_ready and exclusion_ready:
             create_styled_pivot(filtered_df, ['영업부명', '영업지점명'], selected_months, acc_mode='item_avg')
 
         with tab3:
-            st.markdown("##### 영업부/지점/사원을 좁혀가며, 이슈를 딥다이브.")
+            st.markdown("##### 영업부/지점/사원을 좁혀가며, 문제 품목과 담당자를 딥다이브 하세요.")
             # 🎯 [추가됨] 평가 제외 조직(EVAL_EXCLUDE_ORGS)은 상세 분석에서 제외
             t3_base = filtered_df[
                 (~filtered_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
@@ -2031,7 +2154,7 @@ if master_ready and item_master_ready and exclusion_ready:
                 )
             with d_col2:
                 acc_threshold = st.number_input(
-                    "정확도 하위 필터 (100=전체)",
+                    "정확도 하위 필터 (기간 평균 %가 이 값 미만인 품목만, 100=전체)",
                     min_value=0, max_value=100, value=100, step=5
                 )
 
@@ -2040,20 +2163,26 @@ if master_ready and item_master_ready and exclusion_ready:
 
             st.markdown("---")
             st.markdown("##### 👥 지점별 · 영업사원별 정확도/GAP 요약")
-            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준. 품목 필터를 걸면 '그 품목들에 대해 어디가 이슈인지' 분석. 정렬: 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균.")
+            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준이며, 사원 드롭다운과 무관하게 선택 지점 내 전체 사원을 비교합니다. 품목 필터를 걸면 '그 품목들에 대해 누가 문제인지' 바로 보입니다. 정렬: 가장 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균(사원 1명=1표).")
             render_person_summary(summary_base, selected_months)
 
             st.markdown("---")
             st.markdown("##### 📋 상세 테이블 (제품 소계 + 정확도 오름차순)")
-            dynamic_rows = st.multiselect(
-                "📌 행(Row)으로 볼 항목을 배치하세요.",
-                ['제품코드', '제품명', '영업부명', '영업지점명', '영업사원명', '국가'],
-                default=['제품코드', '제품명', '영업사원명']
-            )
-            st.caption("💡 정확도 = 해당 행의 품목별 정확도 평균 / 📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). 정렬은 최근 월의 정확도 오름차순. 하단 전체 평균 = 표시된 세부 행들의 평균이라, 위 요약표의 사원 기준 평균과 다를 수 있음.")
+            # 🎯 행 구성은 고정. 정렬 기준월만 선택 (기간을 넓혀도 원하는 달 기준 정렬 유지)
+            sort_opts = ['(최근 월 자동)'] + selected_months
+            s_col1, _s2 = st.columns([1, 3])
+            with s_col1:
+                sort_pick = st.selectbox("🔽 품목 정렬 기준월", sort_opts, index=0, key="t3_sort_month")
+            sort_month = None if sort_pick == '(최근 월 자동)' else sort_pick
+            st.caption("💡 행 구성: 제품코드 · 제품명 · 영업지점명 · 영업사원명 (고정) / 정확도 = 해당 행의 품목별 정확도 평균 / "
+                       "📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). "
+                       "정렬은 위에서 고른 기준월의 정확도 오름차순(기본값은 조회 기간 중 최근 월). "
+                       "🖱️ **표의 행을 클릭하면 그 제품·지점·사원의 거래처별 계획/실적 내역이 팝업으로 열립니다** "
+                       "(📍 제품 소계 행을 클릭하면 그 제품의 전체 거래처가 표시됩니다). "
+                       "하단 전체 평균 = 표시된 세부 행들의 평균이라, 위 요약표의 사원 기준 평균과 다를 수 있음.")
 
-            if dynamic_rows:
-                render_detail_table(t3_filtered, dynamic_rows, selected_months)
+            render_detail_table(t3_filtered, ['제품코드', '제품명', '영업지점명', '영업사원명'],
+                                selected_months, sort_month=sort_month)
 
         with tab4:
             st.markdown("##### 전월 대비 정확도/GAP 개선 (영업사원별)")
@@ -2070,7 +2199,7 @@ if master_ready and item_master_ready and exclusion_ready:
             render_improvement_tab(imp_base, available_months)
 
     with tab5:
-        st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검)")
+        st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검용)")
         render_progress_tab()
 
     with tab6:
