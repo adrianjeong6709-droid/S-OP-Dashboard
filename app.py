@@ -1594,12 +1594,89 @@ def build_customer_breakdown(df, months_list, code, branch=None, person=None):
     return build_flat_month_table(d, ['거래처 코드'], months_list, include_qty=True)
 
 
+def render_trend_chart(d, months_list, chart_key):
+    """거래처 전체를 합산한 월별 계획·실적 추이 선그래프.
+       실적은 '월 마감 실적이 등록된 월'까지만 그린다(미래 월을 0으로 찍어
+       판매를 못한 것처럼 보이는 착시 방지)."""
+    m = d.groupby('기준월')[['계획수량', '실적수량']].sum().reindex(months_list).fillna(0)
+
+    # 실적 히스토리에 등록된 월만 실적선으로 표시, 그 외는 결측(선 끊김)
+    try:
+        closed_months = set(load_store(ACT_STORE, ACT_COLS, '실적수량')['기준월'].unique())
+    except Exception:
+        closed_months = set()
+    if closed_months:
+        act_y = [v if mm in closed_months else None for mm, v in zip(months_list, m['실적수량'])]
+    else:
+        act_y = list(m['실적수량'])
+
+    if not PLOTLY_OK:
+        st.line_chart(pd.DataFrame({'계획': list(m['계획수량']), '실적': act_y}, index=months_list))
+        return
+
+    def lab(x):
+        try:
+            return pd.to_datetime(str(x) + '-01').strftime("%b '%y")
+        except Exception:
+            return str(x)
+    ticks = [lab(x) for x in months_list]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=months_list, y=list(m['계획수량']), name='계획',
+        mode='lines+markers',
+        line=dict(shape='spline', smoothing=1.3, width=3, color='#1E4D9A'),
+        marker=dict(size=11, color='#BBD6F2', line=dict(width=2.5, color='#1E4D9A')),
+        hovertemplate='%{x}<br>계획: %{y:,.0f}<extra></extra>'))
+    fig.add_trace(go.Scatter(
+        x=months_list, y=act_y, name='실적',
+        mode='lines+markers', connectgaps=False,
+        line=dict(shape='spline', smoothing=1.3, width=3, color='#E8833A'),
+        marker=dict(size=11, color='#FBDCC0', line=dict(width=2.5, color='#E8833A')),
+        hovertemplate='%{x}<br>실적: %{y:,.0f}<extra></extra>'))
+    fig.update_layout(
+        height=300, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(type='category', tickmode='array', tickvals=months_list, ticktext=ticks),
+        yaxis=dict(title='수량', separatethousands=True, rangemode='tozero'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+        hovermode='x unified')
+    st.plotly_chart(fig, width='stretch', key=chart_key)
+
+
 def render_customer_detail(df, months_list, code, pname, branch, person):
+    """months_list가 None이면 데이터에 존재하는 전체 기간(히스토리)을 사용"""
     title = f"{code} {pname}"
     scope = ' · '.join([x for x in [branch, person] if x])
-    st.markdown(f"##### 🧾 거래처별 내역 — {title}")
-    st.caption(f"범위: {scope if scope else '해당 제품 전체'} / 기간: {months_list[0]} ~ {months_list[-1]}")
 
+    d = df[df['제품코드'] == code]
+    if branch is not None:
+        d = d[d['영업지점명'] == branch]
+    if person is not None:
+        d = d[d['영업사원명'] == person]
+    if d.empty:
+        st.markdown(f"##### 🧾 거래처별 내역 — {title}")
+        st.info("표시할 거래처 데이터가 없습니다.")
+        return
+
+    # 계획 또는 실적이 있는 모든 월 (미래 계획 구간 포함)
+    mv = d.groupby('기준월')[['계획수량', '실적수량']].sum()
+    all_months = sorted([m for m in mv[(mv['계획수량'] != 0) | (mv['실적수량'] != 0)].index
+                         if isinstance(m, str) and m.strip()])
+    if months_list is None:
+        months_list = all_months
+    if not months_list:
+        st.markdown(f"##### 🧾 거래처별 내역 — {title}")
+        st.info("표시할 거래처 데이터가 없습니다.")
+        return
+
+    st.markdown(f"##### 🧾 거래처별 내역 — {title}")
+    st.caption(f"범위: {scope if scope else '해당 제품 전체'} / 기간: {months_list[0]} ~ {months_list[-1]} "
+               "(조회 기간 슬라이더와 무관하게 보유한 전체 히스토리를 표시합니다)")
+
+    st.markdown("###### 📈 계획 · 실적 추이 (해당 범위 거래처 합계)")
+    render_trend_chart(d, months_list, chart_key=f"trend_{code}_{branch}_{person}")
+
+    st.markdown("###### 📋 거래처별 상세")
     flat, mp = build_customer_breakdown(df, months_list, code, branch, person)
     if flat is None:
         st.info("표시할 거래처 데이터가 없습니다.")
@@ -1619,7 +1696,7 @@ def render_customer_detail(df, months_list, code, pname, branch, person):
     label_cols = ['거래처 코드']
     if names:
         flat['거래처명'] = flat['거래처 코드'].astype(str).map(names).fillna('(이름 없음)')
-        label_cols = ['거래처명', '거래처 코드']
+        label_cols = ['거래처 코드', '거래처명']
     res = flat[label_cols + vcols].reset_index(drop=True)
     h = min(460, 37 * (len(res) + 1) + 12)
     st.dataframe(res.style.format(build_format_dict(vcols)),
@@ -1629,8 +1706,9 @@ def render_customer_detail(df, months_list, code, pname, branch, person):
 
 
 # 🎯 탭3 메인: 제품 소계 행 + 정확도 오름차순 정렬 상세 테이블
-def render_detail_table(df, index_cols, months_list, sort_month=None):
-    """sort_month: 품목 정렬 기준월 (None이면 조회 기간 중 가장 최근 월)"""
+def render_detail_table(df, index_cols, months_list, sort_month=None, popup_df=None):
+    """sort_month: 품목 정렬 기준월 (None이면 조회 기간 중 가장 최근 월)
+       popup_df: 행 클릭 팝업에서 쓸 데이터(월 필터가 걸리지 않은 전체 히스토리)"""
     if df.empty:
         return st.warning("해당 조건에 맞는 데이터가 없습니다.")
 
@@ -1719,14 +1797,15 @@ def render_detail_table(df, index_cols, months_list, sort_month=None):
         is_sub = (str(b) == '📍 제품 소계') or (str(p) == '📍 제품 소계')
         branch = None if (is_sub or not str(b).strip()) else b
         person = None if (is_sub or not str(p).strip()) else p
+        src_df = popup_df if popup_df is not None else df
         if hasattr(st, 'dialog'):
             @st.dialog("거래처별 상세 내역", width="large")
             def _show():
-                render_customer_detail(df, months_list, code, pname, branch, person)
+                render_customer_detail(src_df, None, code, pname, branch, person)
             _show()
         else:
             with st.expander("🧾 거래처별 상세 내역", expanded=True):
-                render_customer_detail(df, months_list, code, pname, branch, person)
+                render_customer_detail(src_df, None, code, pname, branch, person)
 
 
 # 🎯 탭3 딥다이브 필터: 키워드 검색 + 정확도 하위 품목 필터
@@ -2161,6 +2240,20 @@ if master_ready and item_master_ready and exclusion_ready:
             summary_base = apply_product_filters(branch_df, kw_input, acc_threshold, selected_months)
             t3_filtered = apply_product_filters(t3_df, kw_input, acc_threshold, selected_months)
 
+            # 🎯 팝업(거래처별 내역)용: 월 슬라이더만 빼고 동일 조건을 적용한 전체 히스토리
+            t3_all = raw_df[
+                (raw_df['국가'].isin(sel_countries)) &
+                (~raw_df['제품코드'].isin(exclude_codes)) &
+                (~raw_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
+                (~raw_df['영업지점명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS))
+            ]
+            if t3_dept != '(전체)':
+                t3_all = t3_all[t3_all['영업부명'] == t3_dept]
+            if t3_branch != '(전체)':
+                t3_all = t3_all[t3_all['영업지점명'] == t3_branch]
+            if t3_person != '(전체)':
+                t3_all = t3_all[t3_all['영업사원명'] == t3_person]
+
             st.markdown("---")
             st.markdown("##### 👥 지점별 · 영업사원별 정확도/GAP 요약")
             st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준이며, 사원 드롭다운과 무관하게 선택 지점 내 전체 사원을 비교합니다. 품목 필터를 걸면 '그 품목들에 대해 누가 문제인지' 바로 보입니다. 정렬: 가장 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균(사원 1명=1표).")
@@ -2182,7 +2275,7 @@ if master_ready and item_master_ready and exclusion_ready:
                        "하단 전체 평균 = 표시된 세부 행들의 평균이라, 위 요약표의 사원 기준 평균과 다를 수 있음.")
 
             render_detail_table(t3_filtered, ['제품코드', '제품명', '영업지점명', '영업사원명'],
-                                selected_months, sort_month=sort_month)
+                                selected_months, sort_month=sort_month, popup_df=t3_all)
 
         with tab4:
             st.markdown("##### 전월 대비 정확도/GAP 개선 (영업사원별)")
