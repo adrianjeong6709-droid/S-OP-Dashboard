@@ -751,6 +751,15 @@ GOAL_TABLE_CSS = """<style>
 .goaltbl th, .goaltbl td { border: 1px solid #808080; padding: 4px 8px; text-align: right; }
 .goaltbl th { text-align: center; font-weight: 700; line-height: 1.25; }
 .goaltbl .lbl { text-align: left; }
+.goaltbl .pin1 { position: sticky; left: 0; z-index: 3;
+                 width: 110px; min-width: 110px; max-width: 110px; }
+.goaltbl .pin2 { position: sticky; left: 110px; z-index: 3;
+                 width: 150px; min-width: 150px; max-width: 150px;
+                 box-shadow: 2px 0 0 #808080; }
+.goaltbl tbody td.pin1, .goaltbl tbody td.pin2 { background: #ffffff; }
+.goaltbl tr.sub td.pin1, .goaltbl tr.sub td.pin2 { background: #dce6f5; }
+.goaltbl tr.total td.pin1, .goaltbl tr.total td.pin2 { background: #1f4e79; color: #fff; }
+.goaltbl thead th.pin1, .goaltbl thead th.pin2 { z-index: 5; }
 .goaltbl .h-base { background: #dbe5f1; color: #000; }
 .goaltbl .h-y { background: #fdf2cf; color: #000; }
 .goaltbl .h-y2 { background: #f8d97b; color: #000; }
@@ -785,8 +794,8 @@ def build_goal_html(body, spec, week_specs, mm):
 
     # 1행: 상위 그룹
     r1 = ['<tr>',
-          '<th class="h-base" rowspan="3">영업부</th>',
-          '<th class="h-base" rowspan="3">영업지점</th>',
+          '<th class="h-base pin1" rowspan="3">영업부</th>',
+          '<th class="h-base pin2" rowspan="3">영업지점</th>',
           '<th class="h-base gs" rowspan="3">영업목표</th>',
           '<th class="h-y gs" colspan="3" rowspan="2">Billing 완료</th>',
           '<th class="h-y" colspan="2" rowspan="2">출고 완료</th>',
@@ -820,8 +829,8 @@ def build_goal_html(body, spec, week_specs, mm):
         cls = {'row': '', 'sub': ' class="sub"', 'total': ' class="total"'}[kind_row]
         pin = '📍 ' if kind_row == 'sub' else ''
         tds = [f'<tr{cls}>',
-               f'<td class="lbl">{dept}</td>',
-               f'<td class="lbl">{pin}{branch}</td>',
+               f'<td class="lbl pin1">{dept}</td>',
+               f'<td class="lbl pin2">{pin}{branch}</td>',
                f'<td class="gs">{_fmt_money(vals.get("영업목표"))}</td>']
         for i, (k, kd, color) in enumerate(spec):
             tds.append(f'<td class="gs">{cell(vals.get(k), kd)}</td>' if i in gs
@@ -1626,13 +1635,13 @@ def render_trend_chart(d, months_list, chart_key):
         x=months_list, y=list(m['계획수량']), name='계획',
         mode='lines+markers',
         line=dict(shape='spline', smoothing=1.3, width=3, color='#1E4D9A'),
-        marker=dict(size=11, color='#BBD6F2', line=dict(width=2.5, color='#1E4D9A')),
+        marker=dict(size=13, color='#BBD6F2', line=dict(width=2.5, color='#1E4D9A')),
         hovertemplate='%{x}<br>계획: %{y:,.0f}<extra></extra>'))
     fig.add_trace(go.Scatter(
         x=months_list, y=act_y, name='실적',
         mode='lines+markers', connectgaps=False,
         line=dict(shape='spline', smoothing=1.3, width=3, color='#E8833A'),
-        marker=dict(size=11, color='#FBDCC0', line=dict(width=2.5, color='#E8833A')),
+        marker=dict(size=13, color='#FBDCC0', line=dict(width=2.5, color='#E8833A')),
         hovertemplate='%{x}<br>실적: %{y:,.0f}<extra></extra>'))
     fig.update_layout(
         height=300, margin=dict(l=10, r=10, t=30, b=10),
@@ -1699,8 +1708,14 @@ def render_customer_detail(df, months_list, code, pname, branch, person):
         label_cols = ['거래처 코드', '거래처명']
     res = flat[label_cols + vcols].reset_index(drop=True)
     h = min(460, 37 * (len(res) + 1) + 12)
+    # 🎯 가로 스크롤 시 거래처 코드·거래처명은 왼쪽에 고정 (구버전 Streamlit이면 자동 무시)
+    try:
+        pin_cfg = {c: st.column_config.Column(pinned=True) for c in label_cols}
+    except TypeError:
+        pin_cfg = None
     st.dataframe(res.style.format(build_format_dict(vcols)),
-                 width=df_width(len(res.columns)), hide_index=True, height=h)
+                 width=df_width(len(res.columns)), hide_index=True, height=h,
+                 column_config=pin_cfg)
     totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in vcols]
     render_total_row(label_cols, vcols, totals)
 
@@ -1775,9 +1790,16 @@ def render_detail_table(df, index_cols, months_list, sort_month=None, popup_df=N
     styled = result.style.format(build_format_dict(value_cols)).apply(highlight, axis=1)
     h = min(520, 37 * (len(result) + 1) + 12)
     # 🎯 행을 클릭하면 그 행의 거래처별 내역이 팝업으로 열림
-    ev = st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
-                      column_config=col_cfg(len(result.columns)),
-                      on_select="rerun", selection_mode="single-row", key="t3_detail_table")
+    #    (구버전 Streamlit 등으로 행 선택이 지원되지 않으면 아래 드롭다운으로 대체)
+    ev, sel_ok = None, True
+    try:
+        ev = st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                          column_config=col_cfg(len(result.columns)),
+                          on_select="rerun", selection_mode="single-row", key="t3_detail_table")
+    except TypeError:
+        sel_ok = False
+        st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                     column_config=col_cfg(len(result.columns)))
 
     # 전체 합계/평균: 세부(leaf) 행 기준 (소계 행 중복 합산 방지)
     totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
@@ -1785,9 +1807,28 @@ def render_detail_table(df, index_cols, months_list, sort_month=None, popup_df=N
 
     # --- 선택된 행 → 거래처별 상세 ---
     try:
-        picked = list(ev.selection.rows)
+        picked = list(ev.selection.rows) if ev is not None else []
     except Exception:
         picked = []
+
+    # 🎯 대체 경로: 표의 체크박스가 보이지 않거나 지원되지 않을 때 드롭다운으로 선택
+    with st.expander("🧾 거래처별 상세 열기 (표 왼쪽 체크박스 대신 사용)", expanded=not sel_ok):
+        opts = ['(선택 안 함)']
+        idx_map = {}
+        for i, rr in result.iterrows():
+            b_, p_ = str(rr.get('영업지점명', '')), str(rr.get('영업사원명', ''))
+            if '📍' in b_ or '📍' in p_:
+                lbl = f"[제품 소계] {rr.get('제품코드','')} {rr.get('제품명','')}"
+            else:
+                lbl = f"{rr.get('제품코드','')} {rr.get('제품명','')} | {b_} | {p_}"
+            lbl = f"{i+1}. {lbl}"
+            opts.append(lbl)
+            idx_map[lbl] = i
+        pick_lbl = st.selectbox("행 선택", opts, index=0, key="t3_detail_pick",
+                                label_visibility="collapsed")
+        if pick_lbl != '(선택 안 함)':
+            picked = [idx_map[pick_lbl]]
+
     if picked and picked[0] < len(result):
         r = result.iloc[picked[0]]
         code = r.get('제품코드', '')
