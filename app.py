@@ -1167,6 +1167,17 @@ def build_sales_base(hist_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
     base = pd.concat([hist, act], ignore_index=True)
     if base.empty:
         return base
+
+    # 🎯 [중요] 표시 단계에서 항상 제외 규칙 적용 (다른 탭과 동일 기준 유지).
+    #    업로드 시점 이후에 제외 리스트가 바뀌어도 즉시 반영되도록 여기서 다시 거른다.
+    base['제품코드'] = base['제품코드'].replace(PRODUCT_MAPPING)
+    try:
+        _, drop_codes = load_item_info_and_dropcodes(file_mtime(item_master_path),
+                                                     file_mtime(exclusion_path))
+        drop_codes = set(drop_codes) - set(UDON_KEEP_CODES)
+        base = base[~base['제품코드'].isin(drop_codes)]
+    except Exception:
+        pass
     return base.groupby(['기준월', '거래처 코드', '제품코드'], as_index=False)['실적수량'].sum()
 
 
@@ -1341,13 +1352,17 @@ def render_future_tab(plan_df, item_info, sel_countries):
     # --- ② 품목별 ---
     st.markdown("---")
     st.markdown("##### ② 품목별 계획 vs 과거 판매 (가중 GAP 큰 순)")
-    f1, f2 = st.columns([1, 3])
+    f1, f2, f3 = st.columns([1, 1.4, 1.6])
     with f1:
         month_pick = st.selectbox("대상월", sel_months, index=0, key="fut_item_month")
     with f2:
         min_plan = st.number_input("소량 품목 숨김 (계획 박스 미만)", min_value=0, max_value=1000000,
                                    value=FUTURE_MIN_PLAN_DEFAULT, step=FUTURE_MIN_PLAN_STEP,
                                    key="fut_min_plan")
+    with f3:
+        hide_dormant = st.checkbox("운영 중단 품목 숨김", value=True, key="fut_hide_dormant",
+                                   help="계획 0 + 3개월 평균 0 + 6개월 평균 0 → 사실상 운영하지 않는 품목. "
+                                        "제외 품목 리스트에 넣지 않으므로, 나중에 계획이 잡히면 즉시 다시 나타납니다.")
     wtxt = ' · '.join(f"{k} {int(v*100)}%" for k, v in FUTURE_WEIGHTS.items())
     st.caption(f"💡 가중 GAP = 계획 − 가중 기준값 (가중치: {wtxt}). "
                "양수(빨강)는 과거 대비 과다 계획, 음수(파랑)는 과소 계획입니다. "
@@ -1355,9 +1370,23 @@ def render_future_tab(plan_df, item_info, sel_countries):
 
     t = build_future_table(plan_df, sales, month_pick, keys=('제품코드',), anchor_month=anchor_month)
     t = t.merge(item_info[['제품코드', '제품명']], on='제품코드', how='left')
-    t['제품명'] = t['제품명'].fillna('품목마스터 누락')
+    _unknown = int(t['제품명'].isna().sum())
+    t['제품명'] = t['제품명'].fillna('⚠️ 품목마스터 누락')
+    if _unknown:
+        st.caption(f"⚠️ 품목마스터에 없는 코드 {_unknown}건이 포함되어 있습니다 "
+                   "(제외 대상 여부를 판정할 수 없어 그대로 표시됩니다). 품목마스터 갱신을 권장합니다.")
     t = t[(t['계획'] >= min_plan) | (t['계획'] == 0)]
     t = t[(t['계획'] != 0) | (t['가중 기준'] != 0)]
+
+    # 🎯 운영 중단 품목 숨김: 계획 0 & 3개월 평균 0 & 6개월 평균 0
+    #    (전년 동월·12개월 평균에만 실적이 남은 단종 품목을 화면에서만 제외 — 제외 리스트에는 넣지 않음)
+    if hide_dormant:
+        dormant = (t['계획'] == 0) & (t['3개월 평균'] == 0) & (t['6개월 평균'] == 0)
+        _n_dormant = int(dormant.sum())
+        t = t[~dormant]
+        if _n_dormant:
+            st.caption(f"ℹ️ 운영 중단으로 보이는 품목 {_n_dormant}건을 숨겼습니다 "
+                       "(계획·최근 3개월·6개월 실적이 모두 0). 위 체크를 해제하면 볼 수 있습니다.")
     if t.empty:
         return st.info("조건에 해당하는 품목이 없습니다. (소량 품목 기준을 낮춰보세요)")
 
@@ -2958,9 +2987,11 @@ if master_ready and item_master_ready and exclusion_ready:
         try:
             _item_info, _drop = load_item_info_and_dropcodes(file_mtime(item_master_path),
                                                              file_mtime(exclusion_path))
+            _drop = set(_drop) - set(UDON_KEEP_CODES)
             _plan_all = _plan_all[~_plan_all['제품코드'].isin(_drop)]
-        except Exception:
+        except Exception as _e:
             _item_info = pd.DataFrame(columns=['제품코드', '제품명', '국가'])
+            st.warning(f"⚠️ 품목마스터/제외품목을 읽지 못해 제외 규칙이 적용되지 않았습니다: {_e}")
         if sel_countries is None:
             _countries = sorted(_item_info['국가'].dropna().unique())
         else:
