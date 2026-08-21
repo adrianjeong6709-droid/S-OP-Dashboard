@@ -99,6 +99,17 @@ PRESHIP_COL_MAP = {'문서구분': 'C', '상태': 'AA', '박스': 'V', '금액':
                    '영업부코드': 'L', '영업지점코드': 'N'}
 PRESHIP_DOCTYPE = 'YOCO'      # 빌링전 데이터에서 기본으로 선택하는 문서구분
 
+# =============================================================
+# 🎯 [추가됨] 과거 판매 이력 (계획 검증 전용 · 정확도 계산에는 절대 사용하지 않음)
+#    '25.1월~'26.3월 등 과거 실적을 1회성으로 적재해 미래 계획의 정합성을 검증하는 용도.
+# =============================================================
+SALES_HIST_STORE = os.path.join(HIST_DIR, "sales_history.csv")
+SALES_HIST_COLS = ['기준월', '거래처 코드', '제품코드', '박스', '금액']
+# 원본 파일 컬럼 위치(엑셀 열 문자)
+SALES_HIST_COL_MAP = {'출고월': 'A', '거래처 코드': 'I', '제품코드': 'T',
+                      '구분': 'V', '박스': 'W', '금액': 'X'}
+UDON_KEEP_CODES = ['101001911', '101007351', '101002381']   # TRA.GOODS라도 항상 포함
+
 # [지점코드 통합] 탭6 집계 시 왼쪽 코드를 오른쪽 코드로 합산 (저장 원본은 불변, 설정만 지우면 원복)
 BRANCH_CODE_MERGE = {
     '545': '543',    # E-Commerce Project A → E-Commerce
@@ -669,6 +680,64 @@ def process_preship_upload(f, month):
     out['기준월'] = month
     return out[PRE_COLS]
 
+def parse_sales_hist_month(v):
+    """'MM/YYYY'(08/2025), 'YYYY-MM', 202508, 엑셀 날짜 등 → 'YYYY-MM'"""
+    s = str(v).replace('\xa0', ' ').strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    m = re.fullmatch(r'(\d{1,2})[/\-.](\d{4})', s)      # MM/YYYY
+    if m:
+        return f"{m.group(2)}-{int(m.group(1)):02d}"
+    m = re.fullmatch(r'(\d{4})[/\-.](\d{1,2})', s)      # YYYY-MM
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}"
+    if re.fullmatch(r'\d{6}', s):                        # 202508
+        return f"{s[:4]}-{s[4:]}"
+    if re.fullmatch(r'\d{8}', s):                        # 20250831
+        return f"{s[:4]}-{s[4:6]}"
+    try:
+        return pd.to_datetime(s).strftime('%Y-%m')
+    except Exception:
+        return None
+
+
+def process_sales_history_upload(f):
+    """과거 판매 이력 → (기준월, 거래처 코드, 제품코드, 박스, 금액) 롱포맷.
+       기존 규칙 동일 적용: 사발면 맵핑 / TRA.GOODS 제외(생생우동 3종 예외) / 제외 품목 리스트"""
+    df = read_any(f)
+    idx = {k: col_letter_to_idx(v) for k, v in SALES_HIST_COL_MAP.items()}
+    if df.shape[1] <= max(idx.values()):
+        return None, "컬럼 수가 부족합니다. 열 위치(A/I/T/V/W/X)를 확인해주세요."
+
+    out = pd.DataFrame({
+        '기준월': [parse_sales_hist_month(v) for v in df.iloc[:, idx['출고월']]],
+        '거래처 코드': norm_code(df.iloc[:, idx['거래처 코드']]),
+        '제품코드': clean_code(df.iloc[:, idx['제품코드']]).replace(PRODUCT_MAPPING),
+        '_구분': df.iloc[:, idx['구분']].astype(str).str.upper().str.strip(),
+        '박스': to_num(df.iloc[:, idx['박스']]),
+        '금액': to_num(df.iloc[:, idx['금액']]),
+    })
+    out = out[out['기준월'].notna()]
+    if out.empty:
+        return None, "출고월(A열)을 인식하지 못했습니다."
+
+    # TRA.GOODS 제외 (생생우동 3종은 예외로 유지)
+    tra = out['_구분'].str.contains('TRA', na=False) & ~out['제품코드'].isin(UDON_KEEP_CODES)
+    out = out[~tra].drop(columns=['_구분'])
+
+    # 제외 품목 리스트 + 품목마스터 기준 제외 규칙 동일 적용
+    try:
+        _, drop_codes = load_item_info_and_dropcodes(file_mtime(item_master_path),
+                                                     file_mtime(exclusion_path))
+        drop_codes = set(drop_codes) - set(UDON_KEEP_CODES)
+        out = out[~out['제품코드'].isin(drop_codes)]
+    except Exception:
+        pass
+
+    out = out.groupby(['기준월', '거래처 코드', '제품코드'], as_index=False)[['박스', '금액']].sum()
+    return out, None
+
+
 def load_simple_store(path, columns, num_cols):
     if not os.path.exists(path):
         return pd.DataFrame(columns=columns)
@@ -1037,6 +1106,1376 @@ def render_goal_tab():
 
 
 # =============================================================
+# 🎯 [추가됨] 탭7: 미래 계획 검증 (과거 판매 대비)
+# =============================================================
+# 가중 GAP 산출 시 각 비교 기준의 가중치 (합계 1.0)
+FUTURE_WEIGHTS = {'전년 동월': 0.30, '3개월 평균': 0.40, '6개월 평균': 0.20, '12개월 평균': 0.10}
+FUTURE_MIN_PLAN_DEFAULT = 1000     # 소량 품목 숨김 기본값(박스)
+FUTURE_MIN_PLAN_STEP = 100         # ± 버튼 조절 단위
+
+# [거래처 그룹] 거래처명 앞 N개 단어가 같으면 같은 체인으로 묶음 (예: 'COSTCO WHOLESALE LA/NW' → 2)
+CUSTOMER_GROUP_WORDS = 2
+# 자동 규칙으로 안 맞는 예외는 여기에 (거래처명 일부 또는 거래처 코드 → 그룹명)
+CUSTOMER_GROUP_OVERRIDE = {
+    # 'COSTCO': 'COSTCO',        # 이름에 이 단어가 있으면 무조건 이 그룹으로
+}
+
+
+def customer_group_name(name, code=''):
+    """거래처명에서 체인(그룹)명을 추출"""
+    s = str(name).replace('\xa0', ' ').strip()
+    up = s.upper()
+    for key, grp in CUSTOMER_GROUP_OVERRIDE.items():
+        if str(key).upper() in up or str(key) == str(code):
+            return grp
+    if not s or s == '(이름 없음)':
+        return f"(이름 없음) {code}"
+    parts = [p for p in s.split(' ') if p]
+    if len(parts) <= CUSTOMER_GROUP_WORDS:
+        return s
+    return ' '.join(parts[:CUSTOMER_GROUP_WORDS])
+
+
+def month_shift(m, n):
+    """'YYYY-MM'에서 n개월 이동"""
+    try:
+        return (pd.Period(m, freq='M') + n).strftime('%Y-%m')
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def build_sales_base(hist_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
+    """과거 판매 이력('25.1~'26.3) + 기존 출고실적('26.4~) 을 이어붙인 통합 실적.
+       계획 검증 전용이며 정확도 계산에는 쓰이지 않음."""
+    hist = load_simple_store(SALES_HIST_STORE, SALES_HIST_COLS, ['박스', '금액'])
+    hist = hist[['기준월', '거래처 코드', '제품코드', '박스']].rename(columns={'박스': '실적수량'}) \
+        if not hist.empty else pd.DataFrame(columns=['기준월', '거래처 코드', '제품코드', '실적수량'])
+
+    act = load_store(ACT_STORE, ACT_COLS, '실적수량')
+    if not act.empty:
+        act = apply_period_rules(act, 'actual')
+        act = act[['기준월', '거래처 코드', '제품코드', '실적수량']]
+    else:
+        act = pd.DataFrame(columns=['기준월', '거래처 코드', '제품코드', '실적수량'])
+
+    # 겹치는 월은 출고실적(마감 확정치)을 우선
+    if not hist.empty and not act.empty:
+        dup = set(act['기준월'].unique())
+        hist = hist[~hist['기준월'].isin(dup)]
+
+    base = pd.concat([hist, act], ignore_index=True)
+    if base.empty:
+        return base
+    return base.groupby(['기준월', '거래처 코드', '제품코드'], as_index=False)['실적수량'].sum()
+
+
+def compute_reference(sales, target_month, kinds=('전년 동월', '3개월 평균', '6개월 평균', '12개월 평균'),
+                      anchor_month=None, keys=('제품코드',)):
+    """대상월에 대한 비교 기준값들을 산출.
+       anchor_month: 평균의 기준이 되는 마지막 실적월(없으면 실적 보유 마지막 월)"""
+    keys = list(keys)
+    out = {}
+    if sales.empty:
+        return out
+    have = sorted([m for m in sales['기준월'].unique() if isinstance(m, str) and m.strip()])
+    if not have:
+        return out
+    anchor = anchor_month or have[-1]
+
+    for k in kinds:
+        if k == '전년 동월':
+            ms = [month_shift(target_month, -12)]
+        else:
+            n = int(k.split('개월')[0])
+            ms = [month_shift(anchor, -i) for i in range(n)]
+        ms = [m for m in ms if m in set(have)]
+        if not ms:
+            out[k] = pd.DataFrame(columns=keys + ['값'])
+            continue
+        d = sales[sales['기준월'].isin(ms)]
+        g = d.groupby(keys, as_index=False)['실적수량'].sum()
+        g['값'] = g['실적수량'] / len(ms) if k != '전년 동월' else g['실적수량']
+        out[k] = g[keys + ['값']]
+    return out
+
+
+def build_future_table(plan_df, sales, target_month, keys=('제품코드',), anchor_month=None):
+    """대상월 계획 + 비교 기준값 + 각 기준 대비 GAP + 가중 GAP"""
+    keys = list(keys)
+    p = plan_df[plan_df['기준월'] == target_month]
+    p = p.groupby(keys, as_index=False)['계획수량'].sum() if not p.empty \
+        else pd.DataFrame(columns=keys + ['계획수량'])
+
+    refs = compute_reference(sales, target_month, anchor_month=anchor_month, keys=keys)
+    out = p.rename(columns={'계획수량': '계획'})
+    for k, g in refs.items():
+        out = out.merge(g.rename(columns={'값': k}), on=keys, how='outer')
+    for c in ['계획'] + list(FUTURE_WEIGHTS.keys()):
+        if c not in out.columns:
+            out[c] = 0.0
+        out[c] = pd.to_numeric(out[c], errors='coerce').fillna(0.0)
+
+    # 각 기준 대비 GAP(계획 - 기준) 및 가중 GAP
+    wsum = 0.0
+    weighted = 0.0
+    for k, w in FUTURE_WEIGHTS.items():
+        out[f'{k} GAP'] = out['계획'] - out[k]
+        has = out[k] > 0
+        weighted = weighted + np.where(has, out[f'{k} GAP'] * w, 0.0)
+        wsum = wsum + np.where(has, w, 0.0)
+    out['가중 GAP'] = np.where(wsum > 0, weighted / np.where(wsum == 0, 1, wsum) * 1.0, out['계획'])
+    out['가중 기준'] = out['계획'] - out['가중 GAP']
+    out['배수'] = np.where(out['가중 기준'] > 0, out['계획'] / out['가중 기준'].replace(0, np.nan), np.nan)
+    return out
+
+
+def _fmt_qty(x):
+    if pd.isna(x) or x == 0:
+        return '-'
+    return f"{int(round(x)):,}"
+
+
+def _fmt_gap(x):
+    if pd.isna(x) or x == 0:
+        return '-'
+    return f"{int(round(x)):+,}"
+
+
+def _fmt_mult(x):
+    if pd.isna(x) or np.isinf(x):
+        return '-'
+    return f"{x:.2f}배"
+
+
+def render_future_chart(plan_df, sales, months, anchor_month, chart_key):
+    """월별 총량: 계획(Bar) + 전년 동월(회색 Bar) + 3/6/12개월 평균(선)"""
+    plan_m = plan_df[plan_df['기준월'].isin(months)].groupby('기준월')['계획수량'].sum().reindex(months).fillna(0)
+
+    ly, avg3, avg6, avg12 = [], [], [], []
+    for m in months:
+        refs = compute_reference(sales, m, anchor_month=anchor_month, keys=('제품코드',))
+        ly.append(float(refs.get('전년 동월', pd.DataFrame({'값': []}))['값'].sum()) if '전년 동월' in refs else 0.0)
+        avg3.append(float(refs.get('3개월 평균', pd.DataFrame({'값': []}))['값'].sum()) if '3개월 평균' in refs else 0.0)
+        avg6.append(float(refs.get('6개월 평균', pd.DataFrame({'값': []}))['값'].sum()) if '6개월 평균' in refs else 0.0)
+        avg12.append(float(refs.get('12개월 평균', pd.DataFrame({'값': []}))['값'].sum()) if '12개월 평균' in refs else 0.0)
+
+    if not PLOTLY_OK:
+        st.bar_chart(pd.DataFrame({'계획': list(plan_m), '전년 동월': ly}, index=months))
+        return
+
+    def lab(x):
+        try:
+            return pd.to_datetime(str(x) + '-01').strftime("%b '%y")
+        except Exception:
+            return str(x)
+    ticks = [lab(x) for x in months]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=months, y=list(plan_m), name='계획',
+                         marker_color='#1E4D9A',
+                         hovertemplate='%{x}<br>계획: %{y:,.0f}<extra></extra>'))
+    fig.add_trace(go.Bar(x=months, y=ly, name='전년 동월',
+                         marker_color='#C9CCD1',
+                         hovertemplate='%{x}<br>전년 동월: %{y:,.0f}<extra></extra>'))
+    for nm, ys, color, vis in [('3개월 평균', avg3, '#E8833A', True),
+                               ('6개월 평균', avg6, '#4CAF7D', 'legendonly'),
+                               ('12개월 평균', avg12, '#8E6FBF', 'legendonly')]:
+        fig.add_trace(go.Scatter(x=months, y=ys, name=nm, mode='lines+markers', visible=vis,
+                                 line=dict(shape='spline', smoothing=1.3, width=3, color=color),
+                                 marker=dict(size=10, color='#ffffff', line=dict(width=2.5, color=color)),
+                                 hovertemplate='%{x}<br>' + nm + ': %{y:,.0f}<extra></extra>'))
+    fig.update_layout(
+        barmode='group', height=340, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(type='category', tickmode='array', tickvals=months, ticktext=ticks),
+        yaxis=dict(title='박스', separatethousands=True, rangemode='tozero'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+        hovermode='x unified')
+    st.plotly_chart(fig, width='stretch', key=chart_key)
+
+
+def render_future_tab(plan_df, item_info, sel_countries):
+    sales = build_sales_base(file_mtime(SALES_HIST_STORE), file_mtime(ACT_STORE),
+                             file_mtime(item_master_path), file_mtime(exclusion_path),
+                             PERIOD_RULES_KEY)
+    if sales.empty:
+        return st.info("좌측 📦 영역에서 과거 판매 이력을 먼저 등록해주세요. "
+                       "(기존 출고실적만으로도 동작하지만 전년 동월 비교를 하려면 과거 이력이 필요합니다)")
+    if plan_df.empty:
+        return st.info("수요계획 데이터가 없습니다.")
+
+    # 국가 필터 적용 (품목마스터 기준)
+    code_country = dict(zip(item_info['제품코드'], item_info['국가']))
+    def keep_country(d):
+        c = d['제품코드'].map(code_country).fillna('미분류')
+        return d[c.isin(sel_countries)]
+    sales = keep_country(sales)
+    plan_df = keep_country(plan_df)
+
+    act_months = sorted([m for m in load_store(ACT_STORE, ACT_COLS, '실적수량')['기준월'].unique()
+                         if isinstance(m, str) and m.strip()])
+    anchor_month = act_months[-1] if act_months else None
+
+    plan_months_all = sorted([m for m in plan_df['기준월'].unique() if isinstance(m, str) and m.strip()])
+    future_months = [m for m in plan_months_all if (anchor_month is None or m > anchor_month)]
+    if not future_months:
+        return st.info("검증할 미래 계획이 없습니다. (실적 마감월 이후의 계획이 필요합니다)")
+
+    c1, c2 = st.columns([2, 2])
+    with c1:
+        sel_months = st.multiselect("📅 검증할 계획 월", plan_months_all, default=future_months,
+                                    key="fut_months")
+    with c2:
+        st.caption(f"📌 실적 기준월(평균 계산의 마지막 실적): **{anchor_month or '없음'}** / "
+                   f"보유 실적 기간: {sorted(sales['기준월'].unique())[0]} ~ {sorted(sales['기준월'].unique())[-1]}")
+    if not sel_months:
+        return st.warning("검증할 계획 월을 1개 이상 선택해주세요.")
+
+    # --- ① 전사 월별 총량 ---
+    st.markdown("---")
+    st.markdown("##### ① 월별 총 계획량 vs 과거 판매")
+    st.caption("💡 계획(파랑 Bar) / 전년 동월(회색 Bar) / 3·6·12개월 평균(선). "
+               "범례를 클릭하면 선을 켜고 끌 수 있습니다(6·12개월 평균은 기본 숨김).")
+    render_future_chart(plan_df, sales, sel_months, anchor_month, chart_key='fut_chart')
+
+    # --- ② 품목별 ---
+    st.markdown("---")
+    st.markdown("##### ② 품목별 계획 vs 과거 판매 (가중 GAP 큰 순)")
+    f1, f2 = st.columns([1, 3])
+    with f1:
+        month_pick = st.selectbox("대상월", sel_months, index=0, key="fut_item_month")
+    with f2:
+        min_plan = st.number_input("소량 품목 숨김 (계획 박스 미만)", min_value=0, max_value=1000000,
+                                   value=FUTURE_MIN_PLAN_DEFAULT, step=FUTURE_MIN_PLAN_STEP,
+                                   key="fut_min_plan")
+    wtxt = ' · '.join(f"{k} {int(v*100)}%" for k, v in FUTURE_WEIGHTS.items())
+    st.caption(f"💡 가중 GAP = 계획 − 가중 기준값 (가중치: {wtxt}). "
+               "양수(빨강)는 과거 대비 과다 계획, 음수(파랑)는 과소 계획입니다. "
+               "해당 기준의 과거 실적이 없으면 그 기준은 가중치에서 자동 제외됩니다.")
+
+    t = build_future_table(plan_df, sales, month_pick, keys=('제품코드',), anchor_month=anchor_month)
+    t = t.merge(item_info[['제품코드', '제품명']], on='제품코드', how='left')
+    t['제품명'] = t['제품명'].fillna('품목마스터 누락')
+    t = t[(t['계획'] >= min_plan) | (t['계획'] == 0)]
+    t = t[(t['계획'] != 0) | (t['가중 기준'] != 0)]
+    if t.empty:
+        return st.info("조건에 해당하는 품목이 없습니다. (소량 품목 기준을 낮춰보세요)")
+
+    t['_abs'] = t['가중 GAP'].abs()
+    t = t.sort_values('_abs', ascending=False)
+    show_cols = ['제품코드', '제품명', '계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균',
+                 '가중 기준', '가중 GAP', '배수']
+    disp = t[show_cols].reset_index(drop=True)
+
+    fmt = {c: _fmt_qty for c in ['계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균', '가중 기준']}
+    fmt['가중 GAP'] = _fmt_gap
+    fmt['배수'] = _fmt_mult
+
+    def hl(row):
+        v = row['가중 GAP']
+        if pd.isna(v) or v == 0:
+            return [''] * len(row)
+        return ['background-color: #fbe9e9' if v > 0 else 'background-color: #e8f0fb'] * len(row)
+
+    h = min(560, 37 * (len(disp) + 1) + 12)
+    ev2, sel_ok2 = None, True
+    try:
+        ev2 = st.dataframe(disp.style.format(fmt).apply(hl, axis=1),
+                           width='stretch', hide_index=True, height=h,
+                           on_select="rerun", selection_mode="single-row", key="fut_item_table")
+    except TypeError:
+        sel_ok2 = False
+        st.dataframe(disp.style.format(fmt).apply(hl, axis=1),
+                     width='stretch', hide_index=True, height=h)
+
+    # --- ③ 선택 품목 → 거래처 딥다이브 (팝업) ---
+    try:
+        picked2 = list(ev2.selection.rows) if ev2 is not None else []
+    except Exception:
+        picked2 = []
+    with st.expander("🔎 품목 선택 (표 왼쪽 체크박스 대신 사용)", expanded=not sel_ok2):
+        opts2 = ['(선택 안 함)'] + [f"{i+1}. {r['제품코드']} {r['제품명']}" for i, r in disp.iterrows()]
+        pick2 = st.selectbox("품목 선택", opts2, index=0, key="fut_item_pick",
+                             label_visibility="collapsed")
+        if pick2 != '(선택 안 함)':
+            picked2 = [int(pick2.split('.')[0]) - 1]
+
+    if picked2 and picked2[0] < len(disp):
+        row = disp.iloc[picked2[0]]
+        code, pname = row['제품코드'], row['제품명']
+        may_open2 = dialog_claim('tab7_future', picked2)
+        if hasattr(st, 'dialog') and may_open2:
+            try:
+                _dlg = st.dialog("거래처별 계획 검증", width="large")
+            except TypeError:
+                _dlg = st.dialog("거래처별 계획 검증")
+
+            @_dlg
+            def _show_fut():
+                render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname, fmt, hl)
+                if st.button("닫기", key="fut_dlg_close"):
+                    dialog_release('tab7_future')
+                    st.session_state.pop('fut_cust_pick', None)
+                    st.rerun()
+            _show_fut()
+        elif not hasattr(st, 'dialog'):
+            with st.expander("🧾 거래처별 계획 검증", expanded=True):
+                render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname, fmt, hl)
+
+
+def compute_max_12m(sales, anchor_month, code, cust=None):
+    """최근 12개월 중 '단월 최대 판매량' (프로모션 등으로 튄 달의 실제 최대치).
+       반환: (최대 수량, 해당 월)"""
+    if sales.empty or not anchor_month:
+        return 0.0, ''
+    ms = [month_shift(anchor_month, -i) for i in range(12)]
+    d = sales[sales['기준월'].isin([m for m in ms if m]) & (sales['제품코드'] == code)]
+    if cust:
+        d = d[d['거래처 코드'] == cust]
+    if d.empty:
+        return 0.0, ''
+    g = d.groupby('기준월')['실적수량'].sum()
+    if g.empty or float(g.max()) <= 0:
+        return 0.0, ''
+    return float(g.max()), str(g.idxmax())
+
+
+def render_future_ref_chart(plan_df, sales, month_pick, anchor_month, code, cust=None, chart_key='fc'):
+    """계획 / 전년 동월 / 3·6·12개월 평균 / 12개월 단월 최대 를 비교하는 막대 차트"""
+    keys = ('제품코드', '거래처 코드') if cust else ('제품코드',)
+    t = build_future_table(plan_df, sales, month_pick, keys=keys, anchor_month=anchor_month)
+    t = t[t['제품코드'] == code]
+    if cust:
+        t = t[t['거래처 코드'] == cust]
+    if t.empty:
+        st.info("표시할 데이터가 없습니다.")
+        return
+
+    labels = ['계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균']
+    vals = [float(t[c].sum()) for c in labels]
+
+    # 🎯 12개월 단월 최대(프로모션 피크) — 차트에만 표시
+    mx, mx_month = compute_max_12m(sales, anchor_month, code, cust)
+    max_label = '12개월 MAX'
+    labels = labels + [max_label]
+    vals = vals + [mx]
+
+    if not PLOTLY_OK:
+        st.bar_chart(pd.DataFrame({'값': vals}, index=labels))
+        return
+
+    colors = ['#1E4D9A', '#C9CCD1', '#E8833A', '#4CAF7D', '#8E6FBF', '#B03A5B']
+    texts = [f"{int(round(v)):,}" for v in vals]
+    if mx_month:
+        texts[-1] = f"{int(round(mx)):,}<br>({mx_month})"
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=labels, y=vals, marker_color=colors,
+                         text=texts, textposition='outside',
+                         hovertemplate='%{x}: %{y:,.0f}<extra></extra>'))
+    plan_v = vals[0]
+    if plan_v:
+        fig.add_hline(y=plan_v, line_dash='dot', line_color='#1E4D9A', opacity=0.6)
+    fig.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), showlegend=False,
+                      yaxis=dict(title='박스', separatethousands=True, rangemode='tozero'))
+    st.plotly_chart(fig, width='stretch', key=chart_key)
+    if mx_month:
+        st.caption(f"💡 12개월 MAX = 최근 12개월 중 단월 최대 판매({mx_month}). "
+                   "프로모션으로 튀는 품목은 평균보다 이 값과 비교해 계획의 타당성을 판단하세요. "
+                   "(차트에만 표시되며 가중 GAP 계산에는 반영되지 않습니다)")
+
+
+def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname, fmt, hl):
+    """선택 품목의 거래처별 계획 vs 과거 판매.
+       상단 차트는 기본 '품목 전체', 거래처를 고르면 그 거래처 기준으로 전환"""
+    st.markdown(f"##### 🧾 거래처별 상세 — {code} {pname} ({month_pick})")
+
+    ct = build_future_table(plan_df, sales, month_pick, keys=('제품코드', '거래처 코드'),
+                            anchor_month=anchor_month)
+    ct = ct[ct['제품코드'] == code].copy()
+    ct = ct[(ct['계획'] != 0) | (ct['가중 기준'] != 0)]
+    if ct.empty:
+        return st.info("해당 품목의 거래처 데이터가 없습니다.")
+
+    # 현재 마스터 기준 담당 조직 부착
+    try:
+        ml = load_master_lookup(file_mtime(master_path))
+        ct = ct.merge(ml, on='거래처 코드', how='left')
+    except Exception:
+        for c in ['영업부명', '영업지점명', '영업사원명']:
+            ct[c] = ''
+    for c in ['영업부명', '영업지점명', '영업사원명']:
+        if c not in ct.columns:
+            ct[c] = ''
+        ct[c] = ct[c].fillna('담당 미지정').replace('', '담당 미지정')
+    names = load_customer_names(file_mtime(master_path))
+    ct['거래처명'] = ct['거래처 코드'].astype(str).map(names).fillna('(이름 없음)') if names else '(이름 없음)'
+    ct['거래처그룹'] = [customer_group_name(n, c) for n, c in zip(ct['거래처명'], ct['거래처 코드'])]
+    ct['상태'] = np.where((ct['계획'] == 0) & (ct['가중 기준'] > 0), '⚠️ 계획 누락',
+                  np.where((ct['계획'] > 0) & (ct['가중 기준'] == 0), '🆕 실적 없음', ''))
+    ct['_abs'] = ct['가중 GAP'].abs()
+
+    # --- 상단 차트: 품목 전체 ↔ 선택 거래처 ---
+    cust_pick = st.session_state.get('fut_cust_pick')
+    cust_valid = cust_pick if (cust_pick in set(ct['거래처 코드'])) else None
+    cc1, cc2 = st.columns([3, 1])
+    with cc1:
+        if cust_valid:
+            nm = ct[ct['거래처 코드'] == cust_valid]['거래처명'].iloc[0]
+            st.markdown(f"###### 📊 비교 차트 — {cust_valid} {nm}")
+        else:
+            st.markdown("###### 📊 비교 차트 — 품목 전체")
+    with cc2:
+        if cust_valid and st.button("↩️ 품목 전체로", key="fut_back_all"):
+            st.session_state.pop('fut_cust_pick', None)
+            st.rerun()
+    render_future_ref_chart(plan_df, sales, month_pick, anchor_month, code,
+                            cust=cust_valid, chart_key=f"fc_{code}_{cust_valid}")
+
+    # --- 소계/정렬 옵션 ---
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        grp_mode = st.radio("소계 기준", ['거래처 그룹', '영업사원', '묶지 않음'],
+                            horizontal=True, key=f"futc_grp_{code}")
+    with c2:
+        sort_mode = st.radio("정렬", ['GAP 절대값 큰 순', '과다(+) 큰 순', '과소(−) 큰 순'],
+                             horizontal=True, key=f"futc_sort_{code}")
+
+    vcols = ['계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균', '가중 기준', '가중 GAP', '배수']
+
+    def sort_key(d):
+        if sort_mode == '과다(+) 큰 순':
+            return d.sort_values('가중 GAP', ascending=False)
+        if sort_mode == '과소(−) 큰 순':
+            return d.sort_values('가중 GAP', ascending=True)
+        return d.sort_values('_abs', ascending=False)
+
+    if grp_mode == '묶지 않음':
+        d = sort_key(ct)
+        rows = [[r['거래처 코드'], r['거래처명'], r['영업사원명'], r['상태']] + [r[c] for c in vcols]
+                for _, r in d.iterrows()]
+        sub_pos = []
+    else:
+        gcol = '거래처그룹' if grp_mode == '거래처 그룹' else '영업사원명'
+        g = ct.groupby(gcol)[['계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균',
+                              '가중 기준', '가중 GAP']].sum().reset_index()
+        g['배수'] = np.where(g['가중 기준'] > 0, g['계획'] / g['가중 기준'].replace(0, np.nan), np.nan)
+        g['_abs'] = g['가중 GAP'].abs()
+        g = sort_key(g)
+
+        rows, sub_pos = [], []
+        for _, grow in g.iterrows():
+            blk = sort_key(ct[ct[gcol] == grow[gcol]])
+            for _, r in blk.iterrows():
+                rows.append([r['거래처 코드'], r['거래처명'], r['영업사원명'], r['상태']] + [r[c] for c in vcols])
+            if len(blk) > 1 or grp_mode == '거래처 그룹':
+                rows.append(['', f"📍 {grow[gcol]} 소계", '', ''] + [grow[c] for c in vcols])
+                sub_pos.append(len(rows) - 1)
+
+    ccols = ['거래처 코드', '거래처명', '영업사원명', '상태'] + vcols
+    cdisp = pd.DataFrame(rows, columns=ccols)
+
+    def hl2(row):
+        if row.name in sub_pos:
+            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
+        return hl(row)
+
+    h2 = min(520, 37 * (len(cdisp) + 1) + 12)
+    # 🎯 컬럼 폭: 상태를 영업사원명과 비슷하게, 라벨 컬럼은 왼쪽 고정
+    try:
+        cfg2 = {
+            '거래처 코드': st.column_config.Column(width=110, pinned=True),
+            '거래처명': st.column_config.Column(width=200, pinned=True),
+            '영업사원명': st.column_config.Column(width=120),
+            '상태': st.column_config.Column(width=120),
+        }
+    except TypeError:
+        cfg2 = None
+
+    ev3 = None
+    try:
+        ev3 = st.dataframe(cdisp.style.format(fmt).apply(hl2, axis=1),
+                           width='stretch', hide_index=True, height=h2, column_config=cfg2,
+                           on_select="rerun", selection_mode="single-row",
+                           key=f"fut_cust_table_{code}")
+    except TypeError:
+        st.dataframe(cdisp.style.format(fmt).apply(hl2, axis=1),
+                     width='stretch', hide_index=True, height=h2, column_config=cfg2)
+
+    # 거래처 행을 고르면 상단 차트를 그 거래처 기준으로 전환
+    try:
+        p3 = list(ev3.selection.rows) if ev3 is not None else []
+    except Exception:
+        p3 = []
+    if p3 and p3[0] < len(cdisp):
+        picked_code = str(cdisp.iloc[p3[0]]['거래처 코드']).strip()
+        if picked_code and picked_code != st.session_state.get('fut_cust_pick'):
+            st.session_state['fut_cust_pick'] = picked_code
+            st.rerun()
+
+    st.caption("💡 표에서 거래처 행을 클릭하면 위 차트가 그 거래처 기준으로 바뀝니다(📍 소계 행 제외). "
+               "📍 소계 = 체인(또는 담당자) 합계이며 배수는 합계 기준으로 재계산됩니다. "
+               "⚠️ 계획 누락 = 과거 판매가 있었는데 이번 계획이 없는 거래처 / 🆕 실적 없음 = 과거 판매 없이 계획만. "
+               "영업부·지점·사원은 현재 영업마스터 기준입니다.")
+
+
+# =============================================================
+# 분석/표시 함수
+# =============================================================
+# 🎯 품목 단위 정확도 산출 후 그룹 평균 테이블 생성 (탭2 정확도 로직)
+def build_item_avg_accuracy(df, index_cols):
+    item_cols = list(dict.fromkeys(index_cols + ['제품코드']))
+    item_level = df.groupby(item_cols + ['기준월'])[['계획수량', '실적수량']].sum().reset_index()
+    item_level['_정확도'] = [compute_accuracy(p, a) for p, a in zip(item_level['계획수량'], item_level['실적수량'])]
+    acc_pivot = item_level.pivot_table(index=index_cols, columns='기준월', values='_정확도', aggfunc='mean')
+    return acc_pivot
+
+
+# 🎯 탭1 콤비네이션 차트: 지정 색상 + 축 상한 고정(수량 8M / 정확도 80%, 초과 시 자동 확장)
+def create_combo_chart(df, months_list, chart_key):
+    if df.empty or not months_list:
+        return
+    if not PLOTLY_OK:
+        st.info("📈 차트를 보려면 plotly 설치가 필요합니다. 터미널에서 `pip install plotly` 실행 후 새로고침 해주세요.")
+        return
+
+    monthly = df.groupby('기준월')[['계획수량', '실적수량']].sum().reindex(months_list).fillna(0)
+
+    item_level = df.groupby(['제품코드', '기준월'])[['계획수량', '실적수량']].sum().reset_index()
+    item_level['_정확도'] = [compute_accuracy(p, a) for p, a in zip(item_level['계획수량'], item_level['실적수량'])]
+    acc_monthly = item_level.groupby('기준월')['_정확도'].mean().reindex(months_list)
+
+    qty_peak = float(monthly[['계획수량', '실적수량']].max().max()) if not monthly.empty else 0.0
+    y_max = max(8_000_000, qty_peak * 1.05)
+    acc_valid = acc_monthly.dropna()
+    acc_peak = float(acc_valid.max()) if len(acc_valid) else 0.0
+    y2_max = 0.8 if acc_peak <= 0.8 else min(1.05, acc_peak + 0.05)
+
+    def month_label(m, multi_year):
+        try:
+            dt = pd.to_datetime(str(m) + '-01')
+            return dt.strftime("%b '%y") if multi_year else dt.strftime('%b')
+        except Exception:
+            return str(m)
+
+    years = {str(m)[:4] for m in months_list}
+    multi_year = len(years) > 1
+    tick_labels = [month_label(m, multi_year) for m in months_list]
+
+    acc_texts = ['' if pd.isna(v) else f"{v*100:.1f}%" for v in acc_monthly.values]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=months_list, y=monthly['계획수량'], name='계획',
+        marker_color='#1E4D9A', opacity=0.95,
+        hovertemplate='%{x}<br>계획: %{y:,.0f}<extra></extra>'
+    ))
+    fig.add_trace(go.Bar(
+        x=months_list, y=monthly['실적수량'], name='실적',
+        marker_color='#76A7E1', opacity=0.95,
+        hovertemplate='%{x}<br>실적: %{y:,.0f}<extra></extra>'
+    ))
+    fig.add_trace(go.Scatter(
+        x=months_list, y=acc_monthly.values, name='정확도', yaxis='y2',
+        mode='lines+markers+text',
+        text=acc_texts, textposition='top center',
+        textfont=dict(size=12, color='#0A1A2F', family='Arial Black, sans-serif'),
+        line=dict(shape='spline', smoothing=1.3, width=3, color='#0A1A2F'),
+        marker=dict(size=14, color='#D7DFE9', line=dict(width=3.5, color='#0A1A2F')),
+        hovertemplate='%{x}<br>정확도: %{y:.1%}<extra></extra>'
+    ))
+    fig.update_layout(
+        barmode='group',
+        height=380,
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(type='category', tickmode='array',
+                   tickvals=months_list, ticktext=tick_labels),
+        yaxis=dict(title='수량', separatethousands=True, range=[0, y_max]),
+        yaxis2=dict(title='정확도', overlaying='y', side='right',
+                    range=[0, y2_max], tickformat='.0%', showgrid=False),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig, width='stretch', key=chart_key)
+
+
+# 표시 형식 공통: 정확도/진척도는 %, 수량/GAP은 천단위 콤마, 결측/0은 '-'
+def build_format_dict(cols):
+    format_dict = {}
+    for c in cols:
+        if '진척도' in c:
+            format_dict[c] = lambda x: '-' if pd.isna(x) else ('∞' if np.isinf(x) else f"{x*100:.1f}%")
+        elif '정확도' in c:
+            format_dict[c] = lambda x: '-' if pd.isna(x) else f"{x*100:.1f}%"
+        elif ('계획' in c) or ('실적' in c) or ('GAP' in c):
+            format_dict[c] = lambda x: '-' if pd.isna(x) or x == 0 else f"{int(x):,}"
+    return format_dict
+
+
+# 🎯 표 폭: 컬럼이 적으면 내용 폭에 맞추고, 많으면 화면 폭 기준(가로 스크롤)으로 전환
+WIDE_TABLE_COL_LIMIT = 9
+
+def df_width(ncols):
+    return 'content' if ncols <= WIDE_TABLE_COL_LIMIT else 'stretch'
+
+def col_cfg(ncols, base=None):
+    """컬럼이 많으면 고정 픽셀 폭을 해제한다."""
+    if ncols > WIDE_TABLE_COL_LIMIT:
+        return None
+    return base if base is not None else COMMON_COL_CONFIG
+
+
+# 탭1/탭2용: acc_mode 'sum'=집계 총량 기준 정확도 / 'item_avg'=품목별 정확도의 평균
+def create_styled_pivot(df, index_cols, months_list, acc_mode='sum'):
+    if df.empty:
+        return st.warning("해당 조건에 맞는 데이터가 없습니다.")
+
+    pivot = df.pivot_table(
+        index=index_cols,
+        columns='기준월',
+        values=['계획수량', '실적수량'],
+        aggfunc='sum',
+        fill_value=0
+    )
+
+    acc_pivot = build_item_avg_accuracy(df, index_cols) if acc_mode == 'item_avg' else None
+
+    final_cols = []
+    for m in months_list:
+        if '계획수량' in pivot.columns and m in pivot['계획수량'].columns:
+            p = pivot[('계획수량', m)]
+            a = pivot[('실적수량', m)]
+            pivot[('GAP', m)] = p - a
+            if acc_pivot is not None and m in acc_pivot.columns:
+                pivot[('정확도', m)] = acc_pivot.reindex(pivot.index)[m].values
+            else:
+                acc_list = [compute_accuracy(p_val, a_val) for p_val, a_val in zip(p, a)]
+                pivot[('정확도', m)] = acc_list
+            final_cols.extend([('계획수량', m), ('실적수량', m), ('정확도', m), ('GAP', m)])
+
+    if not final_cols:
+        return st.warning("선택하신 월에 해당하는 실적/계획 데이터가 없습니다.")
+
+    pivot = pivot[final_cols]
+
+    display_name = {'계획수량': '계획', '실적수량': '실적', '정확도': '정확도', 'GAP': 'GAP'}
+    pivot.columns = [f"{m} {display_name.get(col, col)}" for col, m in pivot.columns]
+
+    qty_cols = [c for c in pivot.columns if c.endswith('계획') or c.endswith('실적')]
+    pivot = pivot[pivot[qty_cols].sum(axis=1) != 0]
+
+    if pivot.empty:
+        return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
+
+    totals = []
+    for c in pivot.columns:
+        if '정확도' in c:
+            totals.append(pivot[c].mean())
+        else:
+            totals.append(pivot[c].sum())
+
+    total_index_name = tuple(['전체 합계/평균'] + [''] * (len(index_cols) - 1)) if len(index_cols) > 1 else '전체 합계/평균'
+
+    format_dict = build_format_dict(pivot.columns)
+
+    styled_main = pivot.style.format(format_dict)
+    _n = len(pivot.columns) + len(index_cols)
+    st.dataframe(styled_main, width=df_width(_n), height=500, column_config=col_cfg(_n))
+
+    total_df = pd.DataFrame([totals], columns=pivot.columns, index=pd.Index([total_index_name], name=pivot.index.name))
+    styled_total = total_df.style.format(format_dict).apply(
+        lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
+    )
+    st.dataframe(styled_total, width=df_width(len(total_df.columns) + len(index_cols)),
+                 column_config=col_cfg(len(total_df.columns) + len(index_cols)))
+
+
+# 🎯 그룹별 월별 계획/실적/정확도/GAP 플랫 테이블 (정확도 = 품목별 정확도의 평균)
+def build_flat_month_table(df, index_cols, months_list, include_qty=True):
+    d = df[df['기준월'].isin(months_list)]
+    if d.empty:
+        return None, []
+    g = d.groupby(index_cols + ['기준월'], as_index=False)[['계획수량', '실적수량']].sum()
+    item_cols = list(dict.fromkeys(index_cols + ['제품코드']))
+    il = d.groupby(item_cols + ['기준월'], as_index=False)[['계획수량', '실적수량']].sum()
+    il['_acc'] = [compute_accuracy(p, a) for p, a in zip(il['계획수량'], il['실적수량'])]
+    acc = il.groupby(index_cols + ['기준월'], as_index=False)['_acc'].mean()
+    g = g.merge(acc, on=index_cols + ['기준월'], how='left')
+    g['GAP'] = g['계획수량'] - g['실적수량']
+
+    months_present = [m for m in months_list if m in set(g['기준월'])]
+    if not months_present:
+        return None, []
+
+    out = None
+    for m in months_present:
+        sub = g[g['기준월'] == m].set_index(index_cols)
+        if include_qty:
+            sub = sub[['계획수량', '실적수량', '_acc', 'GAP']]
+            sub.columns = [f"{m} 계획", f"{m} 실적", f"{m} 정확도", f"{m} GAP"]
+        else:
+            sub = sub[['_acc', 'GAP']]
+            sub.columns = [f"{m} 정확도", f"{m} GAP"]
+        out = sub if out is None else out.join(sub, how='outer')
+    return out.reset_index(), months_present
+
+
+def render_total_row(label_cols, value_cols, totals, table_key=None, col_config=None):
+    total_df = pd.DataFrame([[('전체 합계/평균' if i == 0 else '') for i in range(len(label_cols))] + totals],
+                            columns=label_cols + value_cols)
+    styled = total_df.style.format(build_format_dict(value_cols)).apply(
+        lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
+    )
+    n = len(label_cols) + len(value_cols)
+    st.dataframe(styled, width=df_width(n), hide_index=True,
+                 column_config=col_cfg(n, col_config))
+
+
+# 🎯 탭3 상단: 지점별 → 영업사원별 정확도/GAP 요약표 (지점 소계 + 전체 합계/평균)
+def render_person_summary(df, months_list):
+    if df.empty:
+        return st.info("해당 조건에 맞는 데이터가 없습니다.")
+
+    flat, mp = build_flat_month_table(df, ['영업지점명', '영업사원명'], months_list, include_qty=False)
+    if flat is None:
+        return st.info("선택하신 기간에 데이터가 없습니다.")
+    br, _ = build_flat_month_table(df, ['영업지점명'], months_list, include_qty=False)
+
+    value_cols = []
+    for m in mp:
+        value_cols.extend([f"{m} 정확도", f"{m} GAP"])
+    acc_cols = [c for c in value_cols if '정확도' in c]
+    gap_cols = [c for c in value_cols if 'GAP' in c]
+
+    ghost = flat[acc_cols].isna().all(axis=1) & (flat[gap_cols].fillna(0).abs().sum(axis=1) == 0)
+    flat = flat[~ghost]
+    if flat.empty:
+        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
+
+    last_acc = f"{mp[-1]} 정확도"
+    for t in (flat, br):
+        t['_평균정확도'] = t[acc_cols].mean(axis=1)
+        t['_정렬'] = t[last_acc].fillna(t['_평균정확도'])
+
+    rows, subtotal_pos = [], []
+    br_sorted = br.sort_values('_정렬', na_position='last')
+    for _, brow in br_sorted.iterrows():
+        b = brow['영업지점명']
+        ppl = flat[flat['영업지점명'] == b].sort_values('_정렬', na_position='last')
+        if ppl.empty:
+            continue
+        for _, prow in ppl.iterrows():
+            rows.append([b, prow['영업사원명']] + [prow[c] for c in value_cols])
+        rows.append([b, '📍 지점 소계'] + [brow[c] for c in value_cols])
+        subtotal_pos.append(len(rows) - 1)
+
+    if not rows:
+        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
+
+    label_cols = ['영업지점명', '영업사원명']
+    result = pd.DataFrame(rows, columns=label_cols + value_cols)
+
+    def highlight(row):
+        if row.name in subtotal_pos:
+            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
+        return [''] * len(row)
+
+    styled = result.style.format(build_format_dict(value_cols)).apply(highlight, axis=1)
+    h = min(520, 37 * (len(result) + 1) + 12)
+    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                 column_config=col_cfg(len(result.columns)))
+
+    totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
+    render_total_row(label_cols, value_cols, totals)
+
+
+# 🎯 상세 테이블 행 클릭 → 해당 제품/지점/사원의 거래처별 계획·실적 내역
+def build_customer_breakdown(df, months_list, code, branch=None, person=None):
+    d = df[(df['제품코드'] == code) & (df['기준월'].isin(months_list))]
+    if branch is not None:
+        d = d[d['영업지점명'] == branch]
+    if person is not None:
+        d = d[d['영업사원명'] == person]
+    if d.empty:
+        return None, []
+    return build_flat_month_table(d, ['거래처 코드'], months_list, include_qty=True)
+
+
+def render_trend_chart(d, months_list, chart_key):
+    """거래처 전체를 합산한 월별 계획·실적 추이 선그래프.
+       실적은 '월 마감 실적이 등록된 월'까지만 그린다."""
+    m = d.groupby('기준월')[['계획수량', '실적수량']].sum().reindex(months_list).fillna(0)
+
+    try:
+        closed_months = set(load_store(ACT_STORE, ACT_COLS, '실적수량')['기준월'].unique())
+    except Exception:
+        closed_months = set()
+    if closed_months:
+        act_y = [v if mm in closed_months else None for mm, v in zip(months_list, m['실적수량'])]
+    else:
+        act_y = list(m['실적수량'])
+
+    if not PLOTLY_OK:
+        st.line_chart(pd.DataFrame({'계획': list(m['계획수량']), '실적': act_y}, index=months_list))
+        return
+
+    def lab(x):
+        try:
+            return pd.to_datetime(str(x) + '-01').strftime("%b '%y")
+        except Exception:
+            return str(x)
+    ticks = [lab(x) for x in months_list]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=months_list, y=list(m['계획수량']), name='계획',
+        mode='lines+markers',
+        line=dict(shape='spline', smoothing=1.3, width=3, color='#1E4D9A'),
+        marker=dict(size=11, color='#BBD6F2', line=dict(width=2.5, color='#1E4D9A')),
+        hovertemplate='%{x}<br>계획: %{y:,.0f}<extra></extra>'))
+    fig.add_trace(go.Scatter(
+        x=months_list, y=act_y, name='실적',
+        mode='lines+markers', connectgaps=False,
+        line=dict(shape='spline', smoothing=1.3, width=3, color='#E8833A'),
+        marker=dict(size=11, color='#FBDCC0', line=dict(width=2.5, color='#E8833A')),
+        hovertemplate='%{x}<br>실적: %{y:,.0f}<extra></extra>'))
+    fig.update_layout(
+        height=300, margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(type='category', tickmode='array', tickvals=months_list, ticktext=ticks),
+        yaxis=dict(title='수량', separatethousands=True, rangemode='tozero'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+        hovermode='x unified')
+    st.plotly_chart(fig, width='stretch', key=chart_key)
+
+
+def render_customer_detail(df, months_list, code, pname, branch, person):
+    """months_list가 None이면 데이터에 존재하는 전체 기간(히스토리)을 사용"""
+    title = f"{code} {pname}"
+    scope = ' · '.join([x for x in [branch, person] if x])
+
+    d = df[df['제품코드'] == code]
+    if branch is not None:
+        d = d[d['영업지점명'] == branch]
+    if person is not None:
+        d = d[d['영업사원명'] == person]
+    if d.empty:
+        st.markdown(f"##### 🧾 거래처별 내역 — {title}")
+        st.info("표시할 거래처 데이터가 없습니다.")
+        return
+
+    mv = d.groupby('기준월')[['계획수량', '실적수량']].sum()
+    all_months = sorted([m for m in mv[(mv['계획수량'] != 0) | (mv['실적수량'] != 0)].index
+                         if isinstance(m, str) and m.strip()])
+    if months_list is None:
+        months_list = all_months
+    if not months_list:
+        st.markdown(f"##### 🧾 거래처별 내역 — {title}")
+        st.info("표시할 거래처 데이터가 없습니다.")
+        return
+
+    st.markdown(f"##### 🧾 거래처별 내역 — {title}")
+    st.caption(f"범위: {scope if scope else '해당 제품 전체'} / 기간: {months_list[0]} ~ {months_list[-1]} "
+               "(조회 기간 슬라이더와 무관하게 보유한 전체 히스토리를 표시합니다)")
+
+    st.markdown("###### 📈 계획 · 실적 추이 (해당 범위 거래처 합계)")
+    render_trend_chart(d, months_list, chart_key=f"trend_{code}_{branch}_{person}")
+
+    st.markdown("###### 📋 거래처별 상세")
+    flat, mp = build_customer_breakdown(df, months_list, code, branch, person)
+    if flat is None:
+        st.info("표시할 거래처 데이터가 없습니다.")
+        return
+    vcols = []
+    for m in mp:
+        vcols.extend([f"{m} 계획", f"{m} 실적", f"{m} 정확도", f"{m} GAP"])
+    qty = [c for c in vcols if c.endswith('계획') or c.endswith('실적')]
+    flat = flat[flat[qty].fillna(0).sum(axis=1) != 0]
+    if flat.empty:
+        st.info("표시할 거래처 데이터가 없습니다.")
+        return
+    flat = flat.sort_values(f"{mp[-1]} 정확도", na_position='last')
+
+    names = load_customer_names(file_mtime(master_path))
+    label_cols = ['거래처 코드']
+    if names:
+        flat['거래처명'] = flat['거래처 코드'].astype(str).map(names).fillna('(이름 없음)')
+        label_cols = ['거래처 코드', '거래처명']
+    res = flat[label_cols + vcols].reset_index(drop=True)
+    h = min(460, 37 * (len(res) + 1) + 12)
+    try:
+        pin_cfg = {c: st.column_config.Column(pinned=True) for c in label_cols}
+    except TypeError:
+        pin_cfg = None
+    st.dataframe(res.style.format(build_format_dict(vcols)),
+                 width=df_width(len(res.columns)), hide_index=True, height=h,
+                 column_config=pin_cfg)
+    totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in vcols]
+    render_total_row(label_cols, vcols, totals)
+
+
+# 🎯 [추가됨] 팝업(dialog) 중복 열림 방지
+#    Streamlit은 한 번에 하나의 dialog만 허용한다. 여러 탭에 팝업이 있으면
+#    이전 탭의 표 선택이 남아 두 개가 동시에 열리려다 오류가 난다.
+#    → '가장 최근에 새로 선택한 것' 하나만 열고, 나머지 탭의 선택은 해제한다.
+def dialog_claim(owner, picked):
+    """owner: 팝업 소유자 키 / picked: 이번 실행에서 선택된 행 목록.
+       True를 반환하면 이 owner가 팝업을 열어도 된다."""
+    prev = st.session_state.get('_dlg_last', {})
+    cur = prev.get(owner)
+    now = tuple(picked) if picked else None
+
+    if now != cur:                       # 이 표에서 선택이 바뀜 → 소유권 획득
+        prev[owner] = now
+        st.session_state['_dlg_last'] = prev
+        if now is not None:
+            st.session_state['_dlg_owner'] = owner
+            return True
+        if st.session_state.get('_dlg_owner') == owner:
+            st.session_state['_dlg_owner'] = None
+        return False
+
+    # 선택이 그대로면, 현재 소유자일 때만 연다
+    return bool(picked) and st.session_state.get('_dlg_owner') == owner
+
+
+def dialog_release(owner):
+    """팝업을 닫았을 때 호출 — 선택 상태를 비워 다음 탭에서 열 수 있게 한다"""
+    prev = st.session_state.get('_dlg_last', {})
+    prev[owner] = None
+    st.session_state['_dlg_last'] = prev
+    if st.session_state.get('_dlg_owner') == owner:
+        st.session_state['_dlg_owner'] = None
+
+
+# 🎯 탭3 메인: 제품 소계 행 + 정확도 오름차순 정렬 상세 테이블
+def render_detail_table(df, index_cols, months_list, sort_month=None, popup_df=None):
+    """sort_month: 품목 정렬 기준월 (None이면 조회 기간 중 가장 최근 월)
+       popup_df: 행 클릭 팝업에서 쓸 데이터(월 필터가 걸리지 않은 전체 히스토리)"""
+    if df.empty:
+        return st.warning("해당 조건에 맞는 데이터가 없습니다.")
+
+    prod_cols = [c for c in ['제품코드', '제품명'] if c in index_cols]
+    other_cols = [c for c in index_cols if c not in prod_cols]
+    ordered = prod_cols + other_cols
+
+    flat, mp = build_flat_month_table(df, ordered, months_list, include_qty=True)
+    if flat is None:
+        return st.warning("선택하신 월에 해당하는 실적/계획 데이터가 없습니다.")
+
+    value_cols = []
+    for m in mp:
+        value_cols.extend([f"{m} 계획", f"{m} 실적", f"{m} 정확도", f"{m} GAP"])
+    acc_cols = [c for c in value_cols if '정확도' in c]
+    qty_cols = [c for c in value_cols if c.endswith('계획') or c.endswith('실적')]
+
+    flat = flat[flat[qty_cols].fillna(0).sum(axis=1) != 0]
+    if flat.empty:
+        return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
+
+    sm = sort_month if (sort_month in mp) else mp[-1]
+    last_acc = f"{sm} 정확도"
+    def add_sort_key(t):
+        t['_정렬'] = t[last_acc]
+        t['_평균정확도'] = t[acc_cols].mean(axis=1)
+        t['_정렬'] = t['_정렬'].fillna(t['_평균정확도'])
+        return t
+    flat = add_sort_key(flat)
+
+    rows, subtotal_pos = [], []
+
+    if prod_cols and other_cols:
+        sub, _ = build_flat_month_table(df, prod_cols, months_list, include_qty=True)
+        sub = sub[sub[qty_cols].fillna(0).sum(axis=1) != 0]
+        sub = add_sort_key(sub)
+        sub = sub.sort_values('_정렬', na_position='last')
+
+        for _, srow in sub.iterrows():
+            key_mask = np.logical_and.reduce([(flat[c] == srow[c]).values for c in prod_cols])
+            block = flat[key_mask].sort_values('_정렬', na_position='last')
+            if block.empty:
+                continue
+            for _, r in block.iterrows():
+                rows.append([r[c] for c in ordered] + [r[c] for c in value_cols])
+            rows.append([srow[c] for c in prod_cols] + ['📍 제품 소계'] + [''] * (len(other_cols) - 1)
+                        + [srow[c] for c in value_cols])
+            subtotal_pos.append(len(rows) - 1)
+        result = pd.DataFrame(rows, columns=ordered + value_cols)
+    else:
+        result = flat.sort_values('_정렬', na_position='last')[ordered + value_cols].reset_index(drop=True)
+
+    if result.empty:
+        return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
+
+    def highlight(row):
+        if row.name in subtotal_pos:
+            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
+        return [''] * len(row)
+
+    styled = result.style.format(build_format_dict(value_cols)).apply(highlight, axis=1)
+    h = min(520, 37 * (len(result) + 1) + 12)
+    ev, sel_ok = None, True
+    try:
+        ev = st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                          column_config=col_cfg(len(result.columns)),
+                          on_select="rerun", selection_mode="single-row", key="t3_detail_table")
+    except TypeError:
+        sel_ok = False
+        st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                     column_config=col_cfg(len(result.columns)))
+
+    totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
+    render_total_row(ordered, value_cols, totals)
+
+    try:
+        picked = list(ev.selection.rows) if ev is not None else []
+    except Exception:
+        picked = []
+
+    with st.expander("🧾 거래처별 상세 열기 (표 왼쪽 체크박스 대신 사용)", expanded=not sel_ok):
+        opts = ['(선택 안 함)']
+        idx_map = {}
+        for i, rr in result.iterrows():
+            b_, p_ = str(rr.get('영업지점명', '')), str(rr.get('영업사원명', ''))
+            if '📍' in b_ or '📍' in p_:
+                lbl = f"[제품 소계] {rr.get('제품코드','')} {rr.get('제품명','')}"
+            else:
+                lbl = f"{rr.get('제품코드','')} {rr.get('제품명','')} | {b_} | {p_}"
+            lbl = f"{i+1}. {lbl}"
+            opts.append(lbl)
+            idx_map[lbl] = i
+        pick_lbl = st.selectbox("행 선택", opts, index=0, key="t3_detail_pick",
+                                label_visibility="collapsed")
+        if pick_lbl != '(선택 안 함)':
+            picked = [idx_map[pick_lbl]]
+
+    if picked and picked[0] < len(result):
+        r = result.iloc[picked[0]]
+        code = r.get('제품코드', '')
+        pname = r.get('제품명', '')
+        b = r.get('영업지점명', '')
+        p = r.get('영업사원명', '')
+        is_sub = (str(b) == '📍 제품 소계') or (str(p) == '📍 제품 소계')
+        branch = None if (is_sub or not str(b).strip()) else b
+        person = None if (is_sub or not str(p).strip()) else p
+        src_df = popup_df if popup_df is not None else df
+        may_open = dialog_claim('tab3_detail', picked)
+        if hasattr(st, 'dialog') and may_open:
+            @st.dialog("거래처별 상세 내역", width="large")
+            def _show():
+                render_customer_detail(src_df, None, code, pname, branch, person)
+                if st.button("닫기", key="t3_dlg_close"):
+                    dialog_release('tab3_detail')
+                    st.rerun()
+            _show()
+        elif not hasattr(st, 'dialog'):
+            with st.expander("🧾 거래처별 상세 내역", expanded=True):
+                render_customer_detail(src_df, None, code, pname, branch, person)
+
+
+# 🎯 탭3 딥다이브 필터: 키워드 검색 + 정확도 하위 품목 필터
+def apply_product_filters(df, kw_input, acc_threshold, months_list):
+    out = df
+    if kw_input and kw_input.strip():
+        kws = [k.strip() for k in kw_input.split(',') if k.strip()]
+        if kws:
+            mask = pd.Series(False, index=out.index)
+            for k in kws:
+                mask |= out['제품명'].astype(str).str.contains(k, case=False, regex=False, na=False)
+                mask |= out['제품코드'].astype(str).str.contains(k, case=False, regex=False, na=False)
+            out = out[mask]
+    if acc_threshold < 100 and not out.empty:
+        d = out[out['기준월'].isin(months_list)]
+        if not d.empty:
+            il = d.groupby(['제품코드', '기준월'], as_index=False)[['계획수량', '실적수량']].sum()
+            il['_acc'] = [compute_accuracy(p, a) for p, a in zip(il['계획수량'], il['실적수량'])]
+            item_mean = il.groupby('제품코드')['_acc'].mean()
+            low_codes = item_mean[item_mean < acc_threshold / 100].index
+            out = out[out['제품코드'].isin(low_codes)]
+    return out
+
+
+# =============================================================
+# 🎯 탭4: 전월 대비 정확도/GAP 개선 (영업사원별)
+# =============================================================
+def render_improvement_tab(df, available_months):
+    if df is None or df.empty or len(available_months) < 2:
+        return st.info("비교하려면 히스토리에 2개월 이상의 데이터가 필요합니다.")
+
+    def _prev(m):
+        try:
+            return (pd.Period(m, freq='M') - 1).strftime('%Y-%m')
+        except Exception:
+            return None
+
+    month_set = set(available_months)
+    cands = [m for m in available_months if _prev(m) in month_set]
+    default_idx = available_months.index(cands[-1]) if cands else len(available_months) - 1
+    month = st.selectbox("📅 평가 기준월 (이 달과 바로 전월을 비교)", available_months, index=default_idx, key="imp_month")
+    pm = _prev(month)
+    if pm not in month_set:
+        return st.warning(f"전월({pm}) 데이터가 히스토리에 없어 비교할 수 없습니다.")
+
+    st.caption(f"💡 정확도 = 사원(지점)별 품목별 정확도의 평균 / GAP = 총 계획 - 총 실적. "
+               f"정확도 개선 = {month} 정확도 - {pm} 정확도 (%p), GAP 개선 = {pm} GAP - {month} GAP. "
+               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. ")
+
+    flat, mp = build_flat_month_table(df, ['영업지점명', '영업사원명'], [pm, month], include_qty=False)
+    if flat is None or len(mp) < 2:
+        return st.warning("두 달 모두 데이터가 있어야 비교할 수 있습니다.")
+    br, _ = build_flat_month_table(df, ['영업지점명'], [pm, month], include_qty=False)
+
+    acc_prev, acc_cur = f"{pm} 정확도", f"{month} 정확도"
+    gap_prev, gap_cur = f"{pm} GAP", f"{month} GAP"
+
+    for t in (flat, br):
+        t['정확도 개선'] = t[acc_cur] - t[acc_prev]
+        t['GAP 개선'] = t[gap_prev] - t[gap_cur]
+
+    ghost = flat[[acc_prev, acc_cur]].isna().all(axis=1) & (flat[[gap_prev, gap_cur]].fillna(0).abs().sum(axis=1) == 0)
+    flat = flat[~ghost]
+    if flat.empty:
+        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
+
+    value_cols = [acc_prev, acc_cur, '정확도 개선', gap_prev, gap_cur, 'GAP 개선']
+    label_cols = ['영업지점명', '영업사원명']
+
+    rows, subtotal_pos, used_branches = [], [], []
+    br_sorted = br.sort_values(acc_cur, ascending=False, na_position='last')
+    for _, brow in br_sorted.iterrows():
+        b = brow['영업지점명']
+        ppl = flat[flat['영업지점명'] == b].sort_values('정확도 개선', ascending=False, na_position='last')
+        if ppl.empty:
+            continue
+        used_branches.append(b)
+        for _, prow in ppl.iterrows():
+            rows.append([b, prow['영업사원명']] + [prow[c] for c in value_cols])
+        rows.append([b, '📍 지점 소계'] + [brow[c] for c in value_cols])
+        subtotal_pos.append(len(rows) - 1)
+
+    if not rows:
+        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
+
+    result = pd.DataFrame(rows, columns=label_cols + value_cols)
+
+    fmt = build_format_dict(value_cols)
+    fmt['정확도 개선'] = lambda x: '-' if pd.isna(x) else f"{x*100:+.1f}%p"
+    fmt['GAP 개선'] = lambda x: '-' if pd.isna(x) else f"{int(x):+,}"
+
+    def highlight(row):
+        if row.name in subtotal_pos:
+            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
+        v = row['정확도 개선']
+        if pd.notna(v) and v > 0:
+            return ['background-color: #e6f4ea; color: #000000'] * len(row)
+        if pd.notna(v) and v < 0:
+            return ['background-color: #fbe9e9; color: #000000'] * len(row)
+        return [''] * len(row)
+
+    styled = result.style.format(fmt).apply(highlight, axis=1)
+    h = min(560, 37 * (len(result) + 1) + 12)
+    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
+                 column_config=col_cfg(len(result.columns)))
+
+    br_used = br[br['영업지점명'].isin(used_branches)]
+    p_acc_prev, p_acc_cur = flat[acc_prev].mean(), flat[acc_cur].mean()
+    b_acc_prev, b_acc_cur = br_used[acc_prev].mean(), br_used[acc_cur].mean()
+    tot_gap_prev, tot_gap_cur = br_used[gap_prev].sum(), br_used[gap_cur].sum()
+    total_df = pd.DataFrame([
+        ['전체 평균 (사원 기준)', '', p_acc_prev, p_acc_cur, p_acc_cur - p_acc_prev,
+         tot_gap_prev, tot_gap_cur, tot_gap_prev - tot_gap_cur],
+        ['전체 평균 (지점 기준)', '', b_acc_prev, b_acc_cur, b_acc_cur - b_acc_prev,
+         tot_gap_prev, tot_gap_cur, tot_gap_prev - tot_gap_cur],
+    ], columns=label_cols + value_cols)
+    styled_total = total_df.style.format(fmt).apply(
+        lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
+    )
+    st.dataframe(styled_total, width=df_width(len(total_df.columns)), hide_index=True,
+                 column_config=col_cfg(len(total_df.columns)))
+
+
+# =============================================================
+# 🎯 탭5: 당월 진척도 렌더링
+# =============================================================
+def render_progress_tab():
+    prog = load_store(PROG_STORE, PROG_COLS, '실적수량')
+    act = load_store(ACT_STORE, ACT_COLS, '실적수량')
+
+    closed = prog['기준월'].isin(set(act['기준월'].unique()))
+    if not prog.empty and closed.any():
+        save_store(prog[~closed], PROG_STORE)
+        prog = prog[~closed]
+        st.info("월 마감 실적이 등록된 월의 진척도 데이터가 자동 정리되었습니다.")
+
+    if prog.empty:
+        return st.info("좌측 ⏱️ 영역에서 당월 오더/출고 데이터('마감 여부' 컬럼 포함)를 업로드해주세요. 계획은 히스토리에 등록된 해당월 계획을 자동으로 사용합니다.")
+
+    p_months = sorted(prog['기준월'].unique())
+    month = st.selectbox("📅 진척도 대상월", p_months, index=len(p_months) - 1)
+    prog_m = apply_period_rules(prog[prog['기준월'] == month], 'actual')
+    if prog_m.empty:
+        return st.info("기간 한정 규칙 적용 후 남은 진척도 데이터가 없습니다.")
+
+    statuses = sorted(prog_m['마감여부'].unique())
+    try:
+        mnum = str(int(month[5:7]))
+    except Exception:
+        mnum = ''
+    default_sel = [s for s in statuses if '확정' in s and (mnum and f"{mnum}월" in s)]
+    if not default_sel:
+        default_sel = [s for s in statuses if '확정' in s] or statuses
+    sel_status = st.multiselect("✅ 집계에 포함할 오더 상태", statuses, default=default_sel)
+    st.caption("💡 기본값은 확정 오더 기준 실적. '출고 미확정' 을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량.")
+    if not sel_status:
+        return st.warning("집계할 마감 여부 상태를 1개 이상 선택해주세요.")
+
+    prog_sel = prog_m[prog_m['마감여부'].isin(sel_status)].groupby(GROUP_COLS, as_index=False)['실적수량'].sum()
+
+    plan_store = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
+    plan_rows = apply_period_rules(plan_store[plan_store['기준월'] == month], 'plan')
+    plan_m = plan_rows.groupby(GROUP_COLS, as_index=False)['계획수량'].sum()
+    if plan_m.empty:
+        st.warning(f"⚠️ 히스토리에 {month} 계획이 없습니다. 좌측 📚 영역에서 해당월 계획을 먼저 반영해주세요.")
+
+    merged = pd.merge(plan_m, prog_sel, on=GROUP_COLS, how='outer').fillna(0)
+
+    item_info, final_drop_codes = load_item_info_and_dropcodes(file_mtime(item_master_path), file_mtime(exclusion_path))
+    merged = pd.merge(merged, item_info, on='제품코드', how='left')
+    merged['제품명'] = merged['제품명'].fillna('품목마스터 누락')
+    merged['국가'] = merged['국가'].fillna('미분류')
+    merged = merged[~merged['제품코드'].isin(final_drop_codes)]
+    for col in GROUP_COLS + ['제품명']:
+        merged = merged[merged[col] != '미상']
+
+    if merged.empty:
+        return st.info("집계 가능한 데이터가 없습니다.")
+
+    all_countries = sorted(merged['국가'].unique())
+    sel_countries = st.multiselect("🌍 국가 필터", all_countries, default=all_countries, key="prog_country")
+    merged = merged[merged['국가'].isin(sel_countries)]
+    if merged.empty:
+        return st.info("선택한 국가에 해당하는 데이터가 없습니다.")
+
+    fmt_cols = ['계획', '실적', '진척도', 'GAP']
+
+    st.markdown("---")
+    st.markdown(f"##### ① 품목별 진척도 ({month}, 진척도 = 실적 ÷ 계획, 오름차순)")
+    prod = merged.groupby(['제품코드', '제품명'], as_index=False)[['계획수량', '실적수량']].sum()
+    prod['진척도'] = [compute_progress(p, a) for p, a in zip(prod['계획수량'], prod['실적수량'])]
+    prod['GAP'] = prod['계획수량'] - prod['실적수량']
+    prod = prod.sort_values('진척도', na_position='last')
+    prod_disp = prod.rename(columns={'계획수량': '계획', '실적수량': '실적'})[['제품코드', '제품명'] + fmt_cols].reset_index(drop=True)
+    inf_rows_prod = set(prod_disp.index[np.isinf(prod_disp['진척도'].fillna(0))])
+
+    def highlight_prod(row):
+        if row.name in inf_rows_prod:
+            return ['background-color: #fbe9e9; color: #000000'] * len(row)
+        return [''] * len(row)
+
+    h1 = min(520, 37 * (len(prod_disp) + 1) + 12)
+    st.dataframe(prod_disp.style.format(build_format_dict(fmt_cols)).apply(highlight_prod, axis=1),
+                 width=df_width(len(prod_disp.columns)), hide_index=True, height=h1,
+                 column_config=col_cfg(len(prod_disp.columns), PROG_TABLE_CONFIG))
+    t_plan, t_act = prod['계획수량'].sum(), prod['실적수량'].sum()
+    render_total_row(['제품코드', '제품명'], fmt_cols,
+                     [t_plan, t_act, compute_progress(t_plan, t_act), t_plan - t_act],
+                     col_config=PROG_TABLE_CONFIG)
+
+    st.markdown("---")
+    st.markdown("##### ② 진척도 하위 품목 상세 (제품 × 영업부 × 지점 × 사원)")
+    thr = st.number_input("진척도 X% 이하 품목만 (100=전체)", min_value=0, max_value=500, value=100, step=5, key="prog_thr")
+    low_codes = prod[prod['진척도'].fillna(np.inf) <= thr / 100]['제품코드'].tolist()
+    inf_codes = prod[np.isinf(prod['진척도'].fillna(0))]['제품코드'].tolist()
+    list_codes = low_codes + inf_codes
+    low_df = merged[merged['제품코드'].isin(list_codes)]
+    if low_df.empty:
+        st.info("조건에 해당하는 품목이 없습니다.")
+        return
+    st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞).")
+
+    org_cols = ['영업부명', '영업지점명', '영업사원명']
+    detail = low_df.groupby(['제품코드', '제품명'] + org_cols, as_index=False)[['계획수량', '실적수량']].sum()
+    detail['진척도'] = [compute_progress(p, a) for p, a in zip(detail['계획수량'], detail['실적수량'])]
+    detail['GAP'] = detail['계획수량'] - detail['실적수량']
+
+    label_cols = ['제품코드', '제품명'] + org_cols
+    rows, subtotal_pos, inf_pos = [], [], set()
+    prod_low = prod[prod['제품코드'].isin(list_codes)]
+    inf_code_set = set(inf_codes)
+    for _, srow in prod_low.iterrows():
+        is_inf = srow['제품코드'] in inf_code_set
+        block = detail[detail['제품코드'] == srow['제품코드']].sort_values('진척도', na_position='last')
+        if block.empty:
+            continue
+        for _, r in block.iterrows():
+            rows.append([r[c] for c in label_cols] + [r['계획수량'], r['실적수량'], r['진척도'], r['GAP']])
+            if is_inf:
+                inf_pos.add(len(rows) - 1)
+        rows.append([srow['제품코드'], srow['제품명'], '📍 제품 소계', '', '']
+                    + [srow['계획수량'], srow['실적수량'], srow['진척도'], srow['GAP']])
+        subtotal_pos.append(len(rows) - 1)
+        if is_inf:
+            inf_pos.add(len(rows) - 1)
+
+    result = pd.DataFrame(rows, columns=label_cols + fmt_cols)
+
+    def highlight(row):
+        if row.name in subtotal_pos and row.name in inf_pos:
+            return ['background-color: #f2c9c9; font-weight: bold; color: #000000'] * len(row)
+        if row.name in subtotal_pos:
+            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
+        if row.name in inf_pos:
+            return ['background-color: #fbe9e9; color: #000000'] * len(row)
+        return [''] * len(row)
+
+    styled = result.style.format(build_format_dict(fmt_cols)).apply(highlight, axis=1)
+    h2 = min(520, 37 * (len(result) + 1) + 12)
+    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h2,
+                 column_config=col_cfg(len(result.columns), PROG_TABLE_CONFIG))
+    d_plan, d_act = detail['계획수량'].sum(), detail['실적수량'].sum()
+    render_total_row(label_cols, fmt_cols,
+                     [d_plan, d_act, compute_progress(d_plan, d_act), d_plan - d_act],
+                     col_config=PROG_TABLE_CONFIG)
+
+    st.markdown("---")
+    st.markdown("##### ③ 선택 품목 기준 지점 · 영업사원별 GAP (GAP 큰 순)")
+    st.caption("💡 위 ②에서 지정한 조건에 걸린 품목들만 집계한 GAP. (양수 = 미달). "
+               "진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외.")
+    gap_df = merged[merged['제품코드'].isin(low_codes)]
+    if gap_df.empty:
+        return st.info("GAP 집계 대상 품목이 없습니다. (∞ 품목 제외 기준)")
+    pg = gap_df.groupby(['영업지점명', '영업사원명'], as_index=False)[['계획수량', '실적수량']].sum()
+    pg['GAP'] = pg['계획수량'] - pg['실적수량']
+    bg = gap_df.groupby(['영업지점명'], as_index=False)[['계획수량', '실적수량']].sum()
+    bg['GAP'] = bg['계획수량'] - bg['실적수량']
+
+    g_cols = ['계획', '실적', 'GAP']
+    rows3, subtotal_pos3 = [], []
+    for _, brow in bg.sort_values('GAP', ascending=False).iterrows():
+        b = brow['영업지점명']
+        ppl = pg[pg['영업지점명'] == b].sort_values('GAP', ascending=False)
+        for _, prow in ppl.iterrows():
+            rows3.append([b, prow['영업사원명'], prow['계획수량'], prow['실적수량'], prow['GAP']])
+        rows3.append([b, '📍 지점 소계', brow['계획수량'], brow['실적수량'], brow['GAP']])
+        subtotal_pos3.append(len(rows3) - 1)
+
+    result3 = pd.DataFrame(rows3, columns=['영업지점명', '영업사원명'] + g_cols)
+
+    def highlight3(row):
+        if row.name in subtotal_pos3:
+            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
+        return [''] * len(row)
+
+    styled3 = result3.style.format(build_format_dict(g_cols)).apply(highlight3, axis=1)
+    h3 = min(520, 37 * (len(result3) + 1) + 12)
+    st.dataframe(styled3, width=df_width(len(result3.columns)), hide_index=True, height=h3,
+                 column_config=col_cfg(len(result3.columns), PROG_TABLE_CONFIG))
+    render_total_row(['영업지점명', '영업사원명'], g_cols,
+                     [pg['계획수량'].sum(), pg['실적수량'].sum(), pg['계획수량'].sum() - pg['실적수량'].sum()],
+                     col_config=PROG_TABLE_CONFIG)
+
+
+
+# =============================================================
 # 사이드바: 월별 히스토리 등록 (롤링 업서트)
 # =============================================================
 # 열람 비밀번호 게이트: 인증 성공 시 세션에 기록해 입력칸을 화면에서 제거.
@@ -1054,12 +2493,11 @@ if _VIEWER_PW and not st.session_state.get("viewer_ok", False):
 
 if IS_ADMIN:
     st.sidebar.header("📚 월별 히스토리 데이터 (영구 저장)")
-    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 덮어쓰기(업서트)됩니다. 나머지 월은 동결 보존됩니다.")
+    st.sidebar.caption("파일 업로드 → 반영할 월 확인 → 버튼 클릭 시 해당 월만 업서트. 나머지 월은 동결 보존.")
 
     masters_ready = all(os.path.exists(p) for p in [master_path, item_master_path, exclusion_path])
 
     # 🎯 [성능] 업로드 파일 파싱 결과 캐시: 같은 파일이면 최초 1회만 엑셀을 해석.
-    #    월 체크박스를 조작할 때마다 파일을 다시 읽던 문제(화면 비활성화 지연) 해결.
     @st.cache_data(show_spinner=False)
     def _cached_parse(kind, file_bytes, file_name, master_mtime):
         bio = io.BytesIO(file_bytes)
@@ -1123,7 +2561,7 @@ if IS_ADMIN:
 if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("⏱️ 당월 진척도 데이터")
-    st.sidebar.caption("'마감 여부' 컬럼이 포함된 오더 데이터. 업로드 시 전체 교체(스냅샷)되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제됩니다.")
+    st.sidebar.caption("업로드 시 전체 교체되며, 해당월 마감 실적이 히스토리에 등록되면 자동 삭제")
 
     prog_target = st.sidebar.text_input("진척도 대상월 (YYYY-MM)", value=pd.Timestamp.today().strftime('%Y-%m'), key="prog_month")
     prog_file = st.sidebar.file_uploader("5. 당월 오더/출고 데이터", type=['xlsx', 'csv'], key="up_prog")
@@ -1152,7 +2590,7 @@ if IS_ADMIN:
 if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("🎯 월 목표 진척현황 데이터")
-    st.sidebar.caption("영업목표는 연 1회 등록(영구 보관). 빌링완료·빌링전 두 파일은 항상 같은 시점 자료를 함께 올려주세요.")
+    st.sidebar.caption("영업목표는 연 1회 등록. 빌링완료·빌링전 두 파일은 항상 같은 시점 자료 동시 업로드 필요.")
 
     goal_file = st.sidebar.file_uploader("6. 영업목표 (연 1회)", type=['xlsx', 'csv'], key="up_goal")
     if goal_file is not None and st.sidebar.button("✅ 영업목표 등록/교체", key="goal_btn"):
@@ -1173,14 +2611,13 @@ if IS_ADMIN:
         snap_date = st.date_input("기준일자", value=pd.Timestamp.today().date(), key="goal_snap_date")
     with sc2:
         snap_month_in = st.text_input("대상월", value=pd.Timestamp.today().strftime('%Y-%m'), key="goal_snap_month")
-    st.sidebar.caption("※ 대상월 = 이 데이터가 담고 있는 월(YYYY-MM). 월별로 보관되며 같은 달을 다시 올리면 그 달만 교체됩니다.")
+    st.sidebar.caption("※ 대상월 = 이 데이터가 담고 있는 월(YYYY-MM). 월별로 보관되며 같은 달 재업로드 시 그 달만 교체.")
     bill_file = st.sidebar.file_uploader("7. 빌링완료 데이터", type=['xlsx', 'csv'], key="up_bill")
-    pre_file = st.sidebar.file_uploader("8. 빌링전 데이터 (마감월은 생략 가능)", type=['xlsx', 'csv'], key="up_pre")
-    close_month = st.sidebar.checkbox("🔒 월 마감 반영 (이 달의 빌링전 데이터를 비움)", key="goal_close")
+    pre_file = st.sidebar.file_uploader("8. 빌링전 데이터 (마감 시 생략 가능)", type=['xlsx', 'csv'], key="up_pre")
+    close_month = st.sidebar.checkbox("🔒 월 마감 반영 (빌링전 데이터 비움)", key="goal_close")
 
-    st.sidebar.caption("진행 중인 달은 두 파일을 같은 시점 자료로 함께 올리세요. "
-                       "이미 끝난 달(마감)은 빌링완료만 올리고 위 체크박스를 켜면 됩니다. "
-                       "현재 시점의 빌링전 데이터에는 지난달 건이 남아있지 않기 때문입니다.")
+    st.sidebar.caption("진행 중인 달은 두 파일을 같은 시점 자료로 동시 업로드. "
+                       "이미 끝난 달은 빌링완료만 올리고 체크박스. ")
     if st.sidebar.button("✅ 선택한 대상월에 반영", key="billpre_btn"):
         tgt_m = parse_month(snap_month_in)
         if bill_file is None and pre_file is None:
@@ -1222,6 +2659,36 @@ if IS_ADMIN:
                 st.sidebar.success(f"{tgt_m} 반영 완료 [{' + '.join(msgs)}] — 다른 달 데이터는 그대로 보존됩니다.")
                 st.rerun()
 
+# --- 과거 판매 이력 (계획 검증 전용) ---
+if IS_ADMIN:
+    st.sidebar.divider()
+    st.sidebar.header("📦 과거 판매 이력 (계획 검증 전용)")
+    st.sidebar.caption("'25.1월~'26.3월 등 과거 출고 실적. 미래 계획 검증에만 사용되며, "
+                       "탭1~4의 수요계획 정확도에는 전혀 반영되지 않습니다. "
+                       "여러 번 나눠 올려도 되며 같은 월은 교체됩니다.")
+
+    hist_file = st.sidebar.file_uploader("9. 과거 판매 이력", type=['xlsx', 'csv'], key="up_hist")
+    hist_replace = st.sidebar.checkbox("올린 월만 교체(권장) / 해제 시 전체 교체", value=True, key="hist_mode")
+    if hist_file is not None and st.sidebar.button("✅ 과거 판매 이력 반영", key="hist_btn"):
+        try:
+            parsed_h, err_h = process_sales_history_upload(hist_file)
+        except Exception as e:
+            parsed_h, err_h = None, str(e)
+        if parsed_h is None or parsed_h.empty:
+            st.sidebar.error(f"과거 판매 이력 반영 실패: {err_h or '인식된 데이터가 없습니다.'}")
+        else:
+            months_h = sorted(parsed_h['기준월'].unique())
+            if hist_replace:
+                store_h = load_simple_store(SALES_HIST_STORE, SALES_HIST_COLS, ['박스', '금액'])
+                keep_h = store_h[~store_h['기준월'].isin(months_h)] if not store_h.empty else store_h
+                merged_h = pd.concat([keep_h, parsed_h[SALES_HIST_COLS]], ignore_index=True)
+            else:
+                merged_h = parsed_h[SALES_HIST_COLS]
+            save_store(merged_h, SALES_HIST_STORE)
+            st.sidebar.success(f"과거 판매 이력 반영 완료: {months_h[0]} ~ {months_h[-1]} "
+                               f"({len(months_h)}개월 / {len(parsed_h):,}행)")
+            st.rerun()
+
 # --- 저장 현황 및 관리 ---
 st.sidebar.divider()
 st.sidebar.header("🗂️ 저장 데이터 현황" + ("/관리" if IS_ADMIN else ""))
@@ -1247,17 +2714,26 @@ _bill_months = sorted({m for m in (set(load_simple_store(BILL_STORE, BILL_COLS, 
                                    | set(load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])['기준월']))
                        if isinstance(m, str) and m.strip()})
 st.sidebar.caption(f"빌링 보유: {', '.join(_bill_months) if _bill_months else '없음'} (최근 기준일자 {load_meta('기준일자') or '없음'})")
+_hist_store = load_simple_store(SALES_HIST_STORE, SALES_HIST_COLS, ['박스', '금액'])
+_hist_months = sorted([m for m in _hist_store['기준월'].unique()
+                       if isinstance(m, str) and m.strip()]) if not _hist_store.empty else []
+if _hist_months:
+    st.sidebar.caption(f"과거 판매 이력: {_hist_months[0]} ~ {_hist_months[-1]} ({len(_hist_months)}개월)")
+else:
+    st.sidebar.caption("과거 판매 이력: 없음")
 
 if IS_ADMIN:
     with st.sidebar.expander("🧹 특정 월 삭제 / 전체 초기화"):
-        del_target = st.selectbox("대상 저장소", ["계획", "실적", "진척도", "빌링(목표진척)"], key="del_store")
+        del_target = st.selectbox("대상 저장소", ["계획", "실적", "진척도", "빌링(목표진척)", "과거 판매 이력"], key="del_store")
         _opts = {'계획': plan_months, '실적': act_months, '진척도': prog_months,
-                 '빌링(목표진척)': _bill_months}[del_target]
+                 '빌링(목표진척)': _bill_months, '과거 판매 이력': _hist_months}[del_target]
         if _opts:
             del_month_sel = st.selectbox("삭제할 월", _opts, key="del_month")
             if st.button("해당 월 삭제", key="del_btn"):
-                if del_target == '빌링(목표진척)':
-                    # 빌링완료 + 빌링전 두 저장소에서 해당 월 제거
+                if del_target == '과거 판매 이력':
+                    _s = load_simple_store(SALES_HIST_STORE, SALES_HIST_COLS, ['박스', '금액'])
+                    save_store(_s[_s['기준월'] != del_month_sel], SALES_HIST_STORE)
+                elif del_target == '빌링(목표진척)':
                     for _p, _c, _n in [(BILL_STORE, BILL_COLS, ['박스', '금액']),
                                        (PRE_STORE, PRE_COLS, ['박스', '금액'])]:
                         _s = load_simple_store(_p, _c, _n)
@@ -1272,20 +2748,20 @@ if IS_ADMIN:
             st.caption("저장된 월이 없습니다.")
         confirm_reset = st.checkbox("전체 초기화에 동의합니다 (복구 불가)", key="reset_ok")
         if st.button("🚨 히스토리 전체 초기화", key="reset_btn") and confirm_reset:
-            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META]:
+            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META, SALES_HIST_STORE]:
                 if os.path.exists(p):
                     os.remove(p)
             st.rerun()
 
-# --- 마스터 데이터 관리 (기존과 동일) ---
+# --- 마스터 데이터 관리 ---
 st.sidebar.divider()
 if IS_ADMIN:
     st.sidebar.header("⚙️ 마스터 데이터 관리")
-    st.sidebar.caption("최초 1회 업로드 시 시스템에 저장됨. 내용 갱신 필요 시 재업로드.")
+    st.sidebar.caption("1회 업로드 시 시스템에 저장됨. 내용 갱신 필요 시 재업로드.")
 
-    master_upload = st.sidebar.file_uploader("🔄 영업마스터 갱신 (선택)", type=['xlsx', 'csv'])
-    item_master_upload = st.sidebar.file_uploader("🔄 품목마스터 갱신 (선택)", type=['xlsx', 'csv'])
-    exclusion_upload = st.sidebar.file_uploader("🔄 제외 품목 리스트 갱신 (선택)", type=['xlsx', 'csv'])
+    master_upload = st.sidebar.file_uploader("🔄 영업마스터 갱신", type=['xlsx', 'csv'])
+    item_master_upload = st.sidebar.file_uploader("🔄 품목마스터 갱신", type=['xlsx', 'csv'])
+    exclusion_upload = st.sidebar.file_uploader("🔄 제외 품목 리스트 갱신", type=['xlsx', 'csv'])
 
     if master_upload:
         save_uploaded_file(master_upload, "master.xlsx")
@@ -1303,869 +2779,11 @@ exclusion_ready = os.path.exists(exclusion_path)
 
 if master_ready and item_master_ready and exclusion_ready:
     if IS_ADMIN:
-        st.sidebar.info("✅ 마스터 데이터 3종이 내장되어 정상 작동 중입니다.")
+        st.sidebar.info("✅ 마스터 데이터 3종 정상 작동 중.")
 elif IS_ADMIN:
     st.sidebar.warning("⚠️ 저장된 마스터 데이터가 없습니다. 위 ⚙️ 영역에 최초 1회 업로드 해주세요.")
 else:
     st.sidebar.warning("⚠️ 데이터가 준비되지 않았습니다. 관리자에게 문의해주세요.")
-
-
-# =============================================================
-# 분석/표시 함수
-# =============================================================
-# 🎯 품목 단위 정확도 산출 후 그룹 평균 테이블 생성 (탭2 정확도 로직)
-def build_item_avg_accuracy(df, index_cols):
-    item_cols = list(dict.fromkeys(index_cols + ['제품코드']))
-    item_level = df.groupby(item_cols + ['기준월'])[['계획수량', '실적수량']].sum().reset_index()
-    item_level['_정확도'] = [compute_accuracy(p, a) for p, a in zip(item_level['계획수량'], item_level['실적수량'])]
-    acc_pivot = item_level.pivot_table(index=index_cols, columns='기준월', values='_정확도', aggfunc='mean')
-    return acc_pivot
-
-
-# 🎯 탭1 콤비네이션 차트: 지정 색상 + 축 상한 고정(수량 8M / 정확도 80%, 초과 시 자동 확장)
-def create_combo_chart(df, months_list, chart_key):
-    if df.empty or not months_list:
-        return
-    if not PLOTLY_OK:
-        st.info("📈 차트를 보려면 plotly 설치가 필요합니다. 터미널에서 `pip install plotly` 실행 후 새로고침 해주세요.")
-        return
-
-    monthly = df.groupby('기준월')[['계획수량', '실적수량']].sum().reindex(months_list).fillna(0)
-
-    # 월별 정확도 = 품목별 정확도의 평균
-    item_level = df.groupby(['제품코드', '기준월'])[['계획수량', '실적수량']].sum().reset_index()
-    item_level['_정확도'] = [compute_accuracy(p, a) for p, a in zip(item_level['계획수량'], item_level['실적수량'])]
-    acc_monthly = item_level.groupby('기준월')['_정확도'].mean().reindex(months_list)
-
-    # 축 상한: 기본 8,000,000 / 80%. 데이터가 넘으면 잘리지 않게 자동 확장
-    qty_peak = float(monthly[['계획수량', '실적수량']].max().max()) if not monthly.empty else 0.0
-    y_max = max(8_000_000, qty_peak * 1.05)
-    acc_valid = acc_monthly.dropna()
-    acc_peak = float(acc_valid.max()) if len(acc_valid) else 0.0
-    y2_max = 0.8 if acc_peak <= 0.8 else min(1.05, acc_peak + 0.05)
-
-    # x축 라벨: 'Apr', 'May' 형태의 월 약어 (연도가 2개 이상 섞이면 'Apr '26'로 구분)
-    def month_label(m, multi_year):
-        try:
-            dt = pd.to_datetime(str(m) + '-01')
-            return dt.strftime("%b '%y") if multi_year else dt.strftime('%b')
-        except Exception:
-            return str(m)
-
-    years = {str(m)[:4] for m in months_list}
-    multi_year = len(years) > 1
-    tick_labels = [month_label(m, multi_year) for m in months_list]
-
-    # 정확도 마커 위 xx.x% 데이터 라벨
-    acc_texts = ['' if pd.isna(v) else f"{v*100:.1f}%" for v in acc_monthly.values]
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=months_list, y=monthly['계획수량'], name='계획',
-        marker_color='#1E4D9A', opacity=0.95,
-        hovertemplate='%{x}<br>계획: %{y:,.0f}<extra></extra>'
-    ))
-    fig.add_trace(go.Bar(
-        x=months_list, y=monthly['실적수량'], name='실적',
-        marker_color='#76A7E1', opacity=0.95,
-        hovertemplate='%{x}<br>실적: %{y:,.0f}<extra></extra>'
-    ))
-    fig.add_trace(go.Scatter(
-        x=months_list, y=acc_monthly.values, name='정확도', yaxis='y2',
-        mode='lines+markers+text',
-        text=acc_texts, textposition='top center',
-        textfont=dict(size=12, color='#0A1A2F', family='Arial Black, sans-serif'),
-        line=dict(shape='spline', smoothing=1.3, width=3, color='#0A1A2F'),
-        marker=dict(size=14, color='#D7DFE9', line=dict(width=3.5, color='#0A1A2F')),
-        hovertemplate='%{x}<br>정확도: %{y:.1%}<extra></extra>'
-    ))
-    fig.update_layout(
-        barmode='group',
-        height=380,
-        margin=dict(l=10, r=10, t=30, b=10),
-        # type='category': 날짜 자동 인식으로 중간 눈금(Mar 22 등)이 생기는 현상 차단
-        xaxis=dict(type='category', tickmode='array',
-                   tickvals=months_list, ticktext=tick_labels),
-        yaxis=dict(title='수량', separatethousands=True, range=[0, y_max]),
-        yaxis2=dict(title='정확도', overlaying='y', side='right',
-                    range=[0, y2_max], tickformat='.0%', showgrid=False),
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
-        hovermode='x unified'
-    )
-    st.plotly_chart(fig, width='stretch', key=chart_key)
-
-
-# 표시 형식 공통: 정확도/진척도는 %, 수량/GAP은 천단위 콤마, 결측/0은 '-'
-def build_format_dict(cols):
-    format_dict = {}
-    for c in cols:
-        if '진척도' in c:
-            format_dict[c] = lambda x: '-' if pd.isna(x) else ('∞' if np.isinf(x) else f"{x*100:.1f}%")
-        elif '정확도' in c:
-            format_dict[c] = lambda x: '-' if pd.isna(x) else f"{x*100:.1f}%"
-        elif ('계획' in c) or ('실적' in c) or ('GAP' in c):
-            format_dict[c] = lambda x: '-' if pd.isna(x) or x == 0 else f"{int(x):,}"
-    return format_dict
-
-
-# 탭1/탭2용: acc_mode 'sum'=집계 총량 기준 정확도 / 'item_avg'=품목별 정확도의 평균
-def create_styled_pivot(df, index_cols, months_list, acc_mode='sum'):
-    if df.empty:
-        return st.warning("해당 조건에 맞는 데이터가 없습니다.")
-
-    pivot = df.pivot_table(
-        index=index_cols,
-        columns='기준월',
-        values=['계획수량', '실적수량'],
-        aggfunc='sum',
-        fill_value=0
-    )
-
-    acc_pivot = build_item_avg_accuracy(df, index_cols) if acc_mode == 'item_avg' else None
-
-    final_cols = []
-    for m in months_list:
-        if '계획수량' in pivot.columns and m in pivot['계획수량'].columns:
-            p = pivot[('계획수량', m)]
-            a = pivot[('실적수량', m)]
-            pivot[('GAP', m)] = p - a  # GAP은 항상 총량 기준
-            if acc_pivot is not None and m in acc_pivot.columns:
-                pivot[('정확도', m)] = acc_pivot.reindex(pivot.index)[m].values
-            else:
-                acc_list = [compute_accuracy(p_val, a_val) for p_val, a_val in zip(p, a)]
-                pivot[('정확도', m)] = acc_list
-            final_cols.extend([('계획수량', m), ('실적수량', m), ('정확도', m), ('GAP', m)])
-
-    if not final_cols:
-        return st.warning("선택하신 월에 해당하는 실적/계획 데이터가 없습니다.")
-
-    pivot = pivot[final_cols]
-
-    # 화면 표시용 컬럼명 축약 (내부 데이터의 '계획수량'/'실적수량'은 그대로 유지됨)
-    display_name = {'계획수량': '계획', '실적수량': '실적', '정확도': '정확도', 'GAP': 'GAP'}
-    pivot.columns = [f"{m} {display_name.get(col, col)}" for col, m in pivot.columns]
-
-    qty_cols = [c for c in pivot.columns if c.endswith('계획') or c.endswith('실적')]
-    pivot = pivot[pivot[qty_cols].sum(axis=1) != 0]
-
-    if pivot.empty:
-        return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
-
-    totals = []
-    for c in pivot.columns:
-        if '정확도' in c:
-            totals.append(pivot[c].mean())
-        else:
-            totals.append(pivot[c].sum())
-
-    total_index_name = tuple(['전체 합계/평균'] + [''] * (len(index_cols) - 1)) if len(index_cols) > 1 else '전체 합계/평균'
-
-    format_dict = build_format_dict(pivot.columns)
-
-    styled_main = pivot.style.format(format_dict)
-    _n = len(pivot.columns) + len(index_cols)
-    st.dataframe(styled_main, width=df_width(_n), height=500, column_config=col_cfg(_n))
-
-    total_df = pd.DataFrame([totals], columns=pivot.columns, index=pd.Index([total_index_name], name=pivot.index.name))
-    styled_total = total_df.style.format(format_dict).apply(
-        lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
-    )
-    st.dataframe(styled_total, width=df_width(len(total_df.columns) + len(index_cols)),
-                 column_config=col_cfg(len(total_df.columns) + len(index_cols)))
-
-
-# 🎯 그룹별 월별 계획/실적/정확도/GAP 플랫 테이블 (정확도 = 품목별 정확도의 평균)
-def build_flat_month_table(df, index_cols, months_list, include_qty=True):
-    d = df[df['기준월'].isin(months_list)]
-    if d.empty:
-        return None, []
-    g = d.groupby(index_cols + ['기준월'], as_index=False)[['계획수량', '실적수량']].sum()
-    item_cols = list(dict.fromkeys(index_cols + ['제품코드']))
-    il = d.groupby(item_cols + ['기준월'], as_index=False)[['계획수량', '실적수량']].sum()
-    il['_acc'] = [compute_accuracy(p, a) for p, a in zip(il['계획수량'], il['실적수량'])]
-    acc = il.groupby(index_cols + ['기준월'], as_index=False)['_acc'].mean()
-    g = g.merge(acc, on=index_cols + ['기준월'], how='left')
-    g['GAP'] = g['계획수량'] - g['실적수량']
-
-    months_present = [m for m in months_list if m in set(g['기준월'])]
-    if not months_present:
-        return None, []
-
-    out = None
-    for m in months_present:
-        sub = g[g['기준월'] == m].set_index(index_cols)
-        if include_qty:
-            sub = sub[['계획수량', '실적수량', '_acc', 'GAP']]
-            sub.columns = [f"{m} 계획", f"{m} 실적", f"{m} 정확도", f"{m} GAP"]
-        else:
-            sub = sub[['_acc', 'GAP']]
-            sub.columns = [f"{m} 정확도", f"{m} GAP"]
-        out = sub if out is None else out.join(sub, how='outer')
-    return out.reset_index(), months_present
-
-
-# 🎯 표 폭: 컬럼이 적으면 내용 폭에 맞추고, 많으면 화면 폭 기준(가로 스크롤)으로 전환
-#    ('content'는 컬럼이 많아지면 폭 계산이 어긋나 값 컬럼이 잘려 보이는 문제가 있음)
-WIDE_TABLE_COL_LIMIT = 9
-
-def df_width(ncols):
-    return 'content' if ncols <= WIDE_TABLE_COL_LIMIT else 'stretch'
-
-def col_cfg(ncols, base=None):
-    """컬럼이 많으면 고정 픽셀 폭을 해제한다.
-       (제품명 280px 등 라벨 컬럼이 폭을 선점해 값 컬럼이 화면 밖으로 밀려나는 문제 방지)"""
-    if ncols > WIDE_TABLE_COL_LIMIT:
-        return None
-    return base if base is not None else COMMON_COL_CONFIG
-
-
-def render_total_row(label_cols, value_cols, totals, table_key=None, col_config=None):
-    total_df = pd.DataFrame([[('전체 합계/평균' if i == 0 else '') for i in range(len(label_cols))] + totals],
-                            columns=label_cols + value_cols)
-    styled = total_df.style.format(build_format_dict(value_cols)).apply(
-        lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
-    )
-    n = len(label_cols) + len(value_cols)
-    st.dataframe(styled, width=df_width(n), hide_index=True,
-                 column_config=col_cfg(n, col_config))
-
-
-# 🎯 탭3 상단: 지점별 → 영업사원별 정확도/GAP 요약표 (지점 소계 + 전체 합계/평균)
-def render_person_summary(df, months_list):
-    if df.empty:
-        return st.info("해당 조건에 맞는 데이터가 없습니다.")
-
-    flat, mp = build_flat_month_table(df, ['영업지점명', '영업사원명'], months_list, include_qty=False)
-    if flat is None:
-        return st.info("선택하신 기간에 데이터가 없습니다.")
-    br, _ = build_flat_month_table(df, ['영업지점명'], months_list, include_qty=False)
-
-    value_cols = []
-    for m in mp:
-        value_cols.extend([f"{m} 정확도", f"{m} GAP"])
-    acc_cols = [c for c in value_cols if '정확도' in c]
-    gap_cols = [c for c in value_cols if 'GAP' in c]
-
-    # 정확도 결측 & GAP 전무(0)인 유령 행 제거
-    ghost = flat[acc_cols].isna().all(axis=1) & (flat[gap_cols].fillna(0).abs().sum(axis=1) == 0)
-    flat = flat[~ghost]
-    if flat.empty:
-        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
-
-    # 🎯 정렬 기준: 가장 최근 월의 정확도(오름차순), 없으면 기간 평균으로 보조
-    last_acc = f"{mp[-1]} 정확도"
-    for t in (flat, br):
-        t['_평균정확도'] = t[acc_cols].mean(axis=1)
-        t['_정렬'] = t[last_acc].fillna(t['_평균정확도'])
-
-    rows, subtotal_pos = [], []
-    br_sorted = br.sort_values('_정렬', na_position='last')  # 문제 지점이 위로
-    for _, brow in br_sorted.iterrows():
-        b = brow['영업지점명']
-        ppl = flat[flat['영업지점명'] == b].sort_values('_정렬', na_position='last')
-        if ppl.empty:
-            continue
-        for _, prow in ppl.iterrows():
-            rows.append([b, prow['영업사원명']] + [prow[c] for c in value_cols])
-        rows.append([b, '📍 지점 소계'] + [brow[c] for c in value_cols])
-        subtotal_pos.append(len(rows) - 1)
-
-    if not rows:
-        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
-
-    label_cols = ['영업지점명', '영업사원명']
-    result = pd.DataFrame(rows, columns=label_cols + value_cols)
-
-    def highlight(row):
-        if row.name in subtotal_pos:
-            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
-        return [''] * len(row)
-
-    styled = result.style.format(build_format_dict(value_cols)).apply(highlight, axis=1)
-    h = min(520, 37 * (len(result) + 1) + 12)
-    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
-                 column_config=col_cfg(len(result.columns)))
-
-    # 전체 합계/평균: GAP = 사원 행 합계, 정확도 = 사원 행 정확도의 평균
-    totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
-    render_total_row(label_cols, value_cols, totals)
-
-
-# 🎯 [추가됨] 상세 테이블 행 클릭 → 해당 제품/지점/사원의 거래처별 계획·실적 내역
-def build_customer_breakdown(df, months_list, code, branch=None, person=None):
-    d = df[(df['제품코드'] == code) & (df['기준월'].isin(months_list))]
-    if branch is not None:
-        d = d[d['영업지점명'] == branch]
-    if person is not None:
-        d = d[d['영업사원명'] == person]
-    if d.empty:
-        return None, []
-    return build_flat_month_table(d, ['거래처 코드'], months_list, include_qty=True)
-
-
-def render_trend_chart(d, months_list, chart_key):
-    """거래처 전체를 합산한 월별 계획·실적 추이 선그래프.
-       실적은 '월 마감 실적이 등록된 월'까지만 그린다(미래 월을 0으로 찍어
-       판매를 못한 것처럼 보이는 착시 방지)."""
-    m = d.groupby('기준월')[['계획수량', '실적수량']].sum().reindex(months_list).fillna(0)
-
-    # 실적 히스토리에 등록된 월만 실적선으로 표시, 그 외는 결측(선 끊김)
-    try:
-        closed_months = set(load_store(ACT_STORE, ACT_COLS, '실적수량')['기준월'].unique())
-    except Exception:
-        closed_months = set()
-    if closed_months:
-        act_y = [v if mm in closed_months else None for mm, v in zip(months_list, m['실적수량'])]
-    else:
-        act_y = list(m['실적수량'])
-
-    if not PLOTLY_OK:
-        st.line_chart(pd.DataFrame({'계획': list(m['계획수량']), '실적': act_y}, index=months_list))
-        return
-
-    def lab(x):
-        try:
-            return pd.to_datetime(str(x) + '-01').strftime("%b '%y")
-        except Exception:
-            return str(x)
-    ticks = [lab(x) for x in months_list]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=months_list, y=list(m['계획수량']), name='계획',
-        mode='lines+markers',
-        line=dict(shape='spline', smoothing=1.3, width=3, color='#1E4D9A'),
-        marker=dict(size=13, color='#BBD6F2', line=dict(width=2.5, color='#1E4D9A')),
-        hovertemplate='%{x}<br>계획: %{y:,.0f}<extra></extra>'))
-    fig.add_trace(go.Scatter(
-        x=months_list, y=act_y, name='실적',
-        mode='lines+markers', connectgaps=False,
-        line=dict(shape='spline', smoothing=1.3, width=3, color='#E8833A'),
-        marker=dict(size=13, color='#FBDCC0', line=dict(width=2.5, color='#E8833A')),
-        hovertemplate='%{x}<br>실적: %{y:,.0f}<extra></extra>'))
-    fig.update_layout(
-        height=300, margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(type='category', tickmode='array', tickvals=months_list, ticktext=ticks),
-        yaxis=dict(title='수량', separatethousands=True, rangemode='tozero'),
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
-        hovermode='x unified')
-    st.plotly_chart(fig, width='stretch', key=chart_key)
-
-
-def render_customer_detail(df, months_list, code, pname, branch, person):
-    """months_list가 None이면 데이터에 존재하는 전체 기간(히스토리)을 사용"""
-    title = f"{code} {pname}"
-    scope = ' · '.join([x for x in [branch, person] if x])
-
-    d = df[df['제품코드'] == code]
-    if branch is not None:
-        d = d[d['영업지점명'] == branch]
-    if person is not None:
-        d = d[d['영업사원명'] == person]
-    if d.empty:
-        st.markdown(f"##### 🧾 거래처별 내역 — {title}")
-        st.info("표시할 거래처 데이터가 없습니다.")
-        return
-
-    # 계획 또는 실적이 있는 모든 월 (미래 계획 구간 포함)
-    mv = d.groupby('기준월')[['계획수량', '실적수량']].sum()
-    all_months = sorted([m for m in mv[(mv['계획수량'] != 0) | (mv['실적수량'] != 0)].index
-                         if isinstance(m, str) and m.strip()])
-    if months_list is None:
-        months_list = all_months
-    if not months_list:
-        st.markdown(f"##### 🧾 거래처별 내역 — {title}")
-        st.info("표시할 거래처 데이터가 없습니다.")
-        return
-
-    st.markdown(f"##### 🧾 거래처별 내역 — {title}")
-    st.caption(f"범위: {scope if scope else '해당 제품 전체'} / 기간: {months_list[0]} ~ {months_list[-1]} "
-               "(조회 기간 슬라이더와 무관하게 보유한 전체 히스토리를 표시합니다)")
-
-    st.markdown("###### 📈 계획 · 실적 추이 (해당 범위 거래처 합계)")
-    render_trend_chart(d, months_list, chart_key=f"trend_{code}_{branch}_{person}")
-
-    st.markdown("###### 📋 거래처별 상세")
-    flat, mp = build_customer_breakdown(df, months_list, code, branch, person)
-    if flat is None:
-        st.info("표시할 거래처 데이터가 없습니다.")
-        return
-    vcols = []
-    for m in mp:
-        vcols.extend([f"{m} 계획", f"{m} 실적", f"{m} 정확도", f"{m} GAP"])
-    qty = [c for c in vcols if c.endswith('계획') or c.endswith('실적')]
-    flat = flat[flat[qty].fillna(0).sum(axis=1) != 0]
-    if flat.empty:
-        st.info("표시할 거래처 데이터가 없습니다.")
-        return
-    flat = flat.sort_values(f"{mp[-1]} 정확도", na_position='last')
-
-    # 🎯 거래처명 표시 (영업마스터에서 조회, 없으면 코드만)
-    names = load_customer_names(file_mtime(master_path))
-    label_cols = ['거래처 코드']
-    if names:
-        flat['거래처명'] = flat['거래처 코드'].astype(str).map(names).fillna('(이름 없음)')
-        label_cols = ['거래처 코드', '거래처명']
-    res = flat[label_cols + vcols].reset_index(drop=True)
-    h = min(460, 37 * (len(res) + 1) + 12)
-    # 🎯 가로 스크롤 시 거래처 코드·거래처명은 왼쪽에 고정 (구버전 Streamlit이면 자동 무시)
-    try:
-        pin_cfg = {c: st.column_config.Column(pinned=True) for c in label_cols}
-    except TypeError:
-        pin_cfg = None
-    st.dataframe(res.style.format(build_format_dict(vcols)),
-                 width=df_width(len(res.columns)), hide_index=True, height=h,
-                 column_config=pin_cfg)
-    totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in vcols]
-    render_total_row(label_cols, vcols, totals)
-
-
-# 🎯 탭3 메인: 제품 소계 행 + 정확도 오름차순 정렬 상세 테이블
-def render_detail_table(df, index_cols, months_list, sort_month=None, popup_df=None):
-    """sort_month: 품목 정렬 기준월 (None이면 조회 기간 중 가장 최근 월)
-       popup_df: 행 클릭 팝업에서 쓸 데이터(월 필터가 걸리지 않은 전체 히스토리)"""
-    if df.empty:
-        return st.warning("해당 조건에 맞는 데이터가 없습니다.")
-
-    prod_cols = [c for c in ['제품코드', '제품명'] if c in index_cols]
-    other_cols = [c for c in index_cols if c not in prod_cols]
-    ordered = prod_cols + other_cols  # 제품 컬럼을 앞으로
-
-    flat, mp = build_flat_month_table(df, ordered, months_list, include_qty=True)
-    if flat is None:
-        return st.warning("선택하신 월에 해당하는 실적/계획 데이터가 없습니다.")
-
-    value_cols = []
-    for m in mp:
-        value_cols.extend([f"{m} 계획", f"{m} 실적", f"{m} 정확도", f"{m} GAP"])
-    acc_cols = [c for c in value_cols if '정확도' in c]
-    qty_cols = [c for c in value_cols if c.endswith('계획') or c.endswith('실적')]
-
-    flat = flat[flat[qty_cols].fillna(0).sum(axis=1) != 0]
-    if flat.empty:
-        return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
-
-    # 🎯 정렬 기준: 지정한 기준월(없으면 조회 기간 중 가장 최근 월)의 정확도 오름차순.
-    #    그 달에 값이 없는 행은 기간 평균으로 보조 정렬
-    sm = sort_month if (sort_month in mp) else mp[-1]
-    last_acc = f"{sm} 정확도"
-    def add_sort_key(t):
-        t['_정렬'] = t[last_acc]
-        t['_평균정확도'] = t[acc_cols].mean(axis=1)
-        t['_정렬'] = t['_정렬'].fillna(t['_평균정확도'])
-        return t
-    flat = add_sort_key(flat)
-
-    rows, subtotal_pos = [], []
-
-    if prod_cols and other_cols:
-        # 제품 단위 소계 (정확도는 제품 총량 기준 → 탭1과 동일한 수치)
-        sub, _ = build_flat_month_table(df, prod_cols, months_list, include_qty=True)
-        sub = sub[sub[qty_cols].fillna(0).sum(axis=1) != 0]
-        sub = add_sort_key(sub)
-        sub = sub.sort_values('_정렬', na_position='last')  # 최근 월 정확도 낮은 제품이 위로
-
-        for _, srow in sub.iterrows():
-            key_mask = np.logical_and.reduce([(flat[c] == srow[c]).values for c in prod_cols])
-            block = flat[key_mask].sort_values('_정렬', na_position='last')
-            if block.empty:
-                continue
-            for _, r in block.iterrows():
-                rows.append([r[c] for c in ordered] + [r[c] for c in value_cols])
-            rows.append([srow[c] for c in prod_cols] + ['📍 제품 소계'] + [''] * (len(other_cols) - 1)
-                        + [srow[c] for c in value_cols])
-            subtotal_pos.append(len(rows) - 1)
-        result = pd.DataFrame(rows, columns=ordered + value_cols)
-    else:
-        result = flat.sort_values('_정렬', na_position='last')[ordered + value_cols].reset_index(drop=True)
-
-    if result.empty:
-        return st.info("선택된 기간에 유효한 데이터(계획 또는 실적)가 없습니다.")
-
-    def highlight(row):
-        if row.name in subtotal_pos:
-            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
-        return [''] * len(row)
-
-    styled = result.style.format(build_format_dict(value_cols)).apply(highlight, axis=1)
-    h = min(520, 37 * (len(result) + 1) + 12)
-    # 🎯 행을 클릭하면 그 행의 거래처별 내역이 팝업으로 열림
-    #    (구버전 Streamlit 등으로 행 선택이 지원되지 않으면 아래 드롭다운으로 대체)
-    ev, sel_ok = None, True
-    try:
-        ev = st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
-                          column_config=col_cfg(len(result.columns)),
-                          on_select="rerun", selection_mode="single-row", key="t3_detail_table")
-    except TypeError:
-        sel_ok = False
-        st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
-                     column_config=col_cfg(len(result.columns)))
-
-    # 전체 합계/평균: 세부(leaf) 행 기준 (소계 행 중복 합산 방지)
-    totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
-    render_total_row(ordered, value_cols, totals)
-
-    # --- 선택된 행 → 거래처별 상세 ---
-    try:
-        picked = list(ev.selection.rows) if ev is not None else []
-    except Exception:
-        picked = []
-
-    # 🎯 대체 경로: 표의 체크박스가 보이지 않거나 지원되지 않을 때 드롭다운으로 선택
-    with st.expander("🧾 거래처별 상세 열기 (표 왼쪽 체크박스 대신 사용)", expanded=not sel_ok):
-        opts = ['(선택 안 함)']
-        idx_map = {}
-        for i, rr in result.iterrows():
-            b_, p_ = str(rr.get('영업지점명', '')), str(rr.get('영업사원명', ''))
-            if '📍' in b_ or '📍' in p_:
-                lbl = f"[제품 소계] {rr.get('제품코드','')} {rr.get('제품명','')}"
-            else:
-                lbl = f"{rr.get('제품코드','')} {rr.get('제품명','')} | {b_} | {p_}"
-            lbl = f"{i+1}. {lbl}"
-            opts.append(lbl)
-            idx_map[lbl] = i
-        pick_lbl = st.selectbox("행 선택", opts, index=0, key="t3_detail_pick",
-                                label_visibility="collapsed")
-        if pick_lbl != '(선택 안 함)':
-            picked = [idx_map[pick_lbl]]
-
-    if picked and picked[0] < len(result):
-        r = result.iloc[picked[0]]
-        code = r.get('제품코드', '')
-        pname = r.get('제품명', '')
-        b = r.get('영업지점명', '')
-        p = r.get('영업사원명', '')
-        is_sub = (str(b) == '📍 제품 소계') or (str(p) == '📍 제품 소계')
-        branch = None if (is_sub or not str(b).strip()) else b
-        person = None if (is_sub or not str(p).strip()) else p
-        src_df = popup_df if popup_df is not None else df
-        if hasattr(st, 'dialog'):
-            @st.dialog("거래처별 상세 내역", width="large")
-            def _show():
-                render_customer_detail(src_df, None, code, pname, branch, person)
-            _show()
-        else:
-            with st.expander("🧾 거래처별 상세 내역", expanded=True):
-                render_customer_detail(src_df, None, code, pname, branch, person)
-
-
-# 🎯 탭3 딥다이브 필터: 키워드 검색 + 정확도 하위 품목 필터
-def apply_product_filters(df, kw_input, acc_threshold, months_list):
-    out = df
-    if kw_input and kw_input.strip():
-        kws = [k.strip() for k in kw_input.split(',') if k.strip()]
-        if kws:
-            mask = pd.Series(False, index=out.index)
-            for k in kws:
-                mask |= out['제품명'].astype(str).str.contains(k, case=False, regex=False, na=False)
-                mask |= out['제품코드'].astype(str).str.contains(k, case=False, regex=False, na=False)
-            out = out[mask]
-    if acc_threshold < 100 and not out.empty:
-        d = out[out['기준월'].isin(months_list)]
-        if not d.empty:
-            il = d.groupby(['제품코드', '기준월'], as_index=False)[['계획수량', '실적수량']].sum()
-            il['_acc'] = [compute_accuracy(p, a) for p, a in zip(il['계획수량'], il['실적수량'])]
-            item_mean = il.groupby('제품코드')['_acc'].mean()
-            low_codes = item_mean[item_mean < acc_threshold / 100].index
-            out = out[out['제품코드'].isin(low_codes)]
-    return out
-
-
-# =============================================================
-# 🎯 탭4: 전월 대비 정확도/GAP 개선 (영업사원별)
-# =============================================================
-def render_improvement_tab(df, available_months):
-    if df is None or df.empty or len(available_months) < 2:
-        return st.info("비교하려면 히스토리에 2개월 이상의 데이터가 필요합니다.")
-
-    def _prev(m):
-        try:
-            return (pd.Period(m, freq='M') - 1).strftime('%Y-%m')
-        except Exception:
-            return None
-
-    month_set = set(available_months)
-    cands = [m for m in available_months if _prev(m) in month_set]
-    default_idx = available_months.index(cands[-1]) if cands else len(available_months) - 1
-    month = st.selectbox("📅 평가 기준월 (이 달과 바로 전월을 비교)", available_months, index=default_idx, key="imp_month")
-    pm = _prev(month)
-    if pm not in month_set:
-        return st.warning(f"전월({pm}) 데이터가 히스토리에 없어 비교할 수 없습니다.")
-
-    st.caption(f"💡 정확도 = 사원(지점)별 품목별 정확도의 평균 / GAP = 총 계획 - 총 실적. "
-               f"정확도 개선 = {month} 정확도 - {pm} 정확도 (%p), GAP 개선 = {pm} GAP - {month} GAP. "
-               "정렬: 지점은 기준월 정확도 내림차순, 지점 내 사원은 정확도 개선 내림차순. "
-               "🟢 옅은 녹색 = 전월 대비 정확도 상승, 🔴 옅은 붉은색 = 하락. "
-               "하단 전체 평균은 사원 기준(사원 1명=1표)과 지점 기준(지점 소계의 평균, 지점 1개=1표)을 함께 표시합니다.")
-
-    flat, mp = build_flat_month_table(df, ['영업지점명', '영업사원명'], [pm, month], include_qty=False)
-    if flat is None or len(mp) < 2:
-        return st.warning("두 달 모두 데이터가 있어야 비교할 수 있습니다.")
-    br, _ = build_flat_month_table(df, ['영업지점명'], [pm, month], include_qty=False)
-
-    acc_prev, acc_cur = f"{pm} 정확도", f"{month} 정확도"
-    gap_prev, gap_cur = f"{pm} GAP", f"{month} GAP"
-
-    for t in (flat, br):
-        t['정확도 개선'] = t[acc_cur] - t[acc_prev]
-        t['GAP 개선'] = t[gap_prev] - t[gap_cur]
-
-    # 두 달 모두 유효 데이터가 없는 유령 행 제거
-    ghost = flat[[acc_prev, acc_cur]].isna().all(axis=1) & (flat[[gap_prev, gap_cur]].fillna(0).abs().sum(axis=1) == 0)
-    flat = flat[~ghost]
-    if flat.empty:
-        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
-
-    value_cols = [acc_prev, acc_cur, '정확도 개선', gap_prev, gap_cur, 'GAP 개선']
-    label_cols = ['영업지점명', '영업사원명']
-
-    rows, subtotal_pos, used_branches = [], [], []
-    br_sorted = br.sort_values(acc_cur, ascending=False, na_position='last')  # 지점: 기준월 정확도 내림차순
-    for _, brow in br_sorted.iterrows():
-        b = brow['영업지점명']
-        ppl = flat[flat['영업지점명'] == b].sort_values('정확도 개선', ascending=False, na_position='last')
-        if ppl.empty:
-            continue
-        used_branches.append(b)
-        for _, prow in ppl.iterrows():
-            rows.append([b, prow['영업사원명']] + [prow[c] for c in value_cols])
-        rows.append([b, '📍 지점 소계'] + [brow[c] for c in value_cols])
-        subtotal_pos.append(len(rows) - 1)
-
-    if not rows:
-        return st.info("선택하신 기간에 유효한 데이터가 없습니다.")
-
-    result = pd.DataFrame(rows, columns=label_cols + value_cols)
-
-    fmt = build_format_dict(value_cols)
-    fmt['정확도 개선'] = lambda x: '-' if pd.isna(x) else f"{x*100:+.1f}%p"
-    fmt['GAP 개선'] = lambda x: '-' if pd.isna(x) else f"{int(x):+,}"
-
-    def highlight(row):
-        if row.name in subtotal_pos:
-            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
-        v = row['정확도 개선']
-        if pd.notna(v) and v > 0:
-            return ['background-color: #e6f4ea; color: #000000'] * len(row)
-        if pd.notna(v) and v < 0:
-            return ['background-color: #fbe9e9; color: #000000'] * len(row)
-        return [''] * len(row)
-
-    styled = result.style.format(fmt).apply(highlight, axis=1)
-    h = min(560, 37 * (len(result) + 1) + 12)
-    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
-                 column_config=col_cfg(len(result.columns)))
-
-    # 전체 평균: 두 가지 기준을 모두 표시
-    # ① 사원 기준 = 표의 사원 행 전체 평균 (사원 1명 = 1표)
-    # ② 지점 기준 = 표에 표시된 지점 소계들의 평균 (지점 1개 = 1표, 탭2 전체 평균과 동일·손검산 일치)
-    br_used = br[br['영업지점명'].isin(used_branches)]
-    p_acc_prev, p_acc_cur = flat[acc_prev].mean(), flat[acc_cur].mean()
-    b_acc_prev, b_acc_cur = br_used[acc_prev].mean(), br_used[acc_cur].mean()
-    tot_gap_prev, tot_gap_cur = br_used[gap_prev].sum(), br_used[gap_cur].sum()
-    total_df = pd.DataFrame([
-        ['전체 평균 (사원 기준)', '', p_acc_prev, p_acc_cur, p_acc_cur - p_acc_prev,
-         tot_gap_prev, tot_gap_cur, tot_gap_prev - tot_gap_cur],
-        ['전체 평균 (지점 기준)', '', b_acc_prev, b_acc_cur, b_acc_cur - b_acc_prev,
-         tot_gap_prev, tot_gap_cur, tot_gap_prev - tot_gap_cur],
-    ], columns=label_cols + value_cols)
-    styled_total = total_df.style.format(fmt).apply(
-        lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
-    )
-    st.dataframe(styled_total, width=df_width(len(total_df.columns)), hide_index=True,
-                 column_config=col_cfg(len(total_df.columns)))
-
-
-# =============================================================
-# 🎯 탭5: 당월 진척도 렌더링
-# =============================================================
-def render_progress_tab():
-    prog = load_store(PROG_STORE, PROG_COLS, '실적수량')
-    act = load_store(ACT_STORE, ACT_COLS, '실적수량')
-
-    # 자동 세대교체 이중 안전장치: 마감 실적이 있는 월의 진척도는 화면에서도 제거
-    closed = prog['기준월'].isin(set(act['기준월'].unique()))
-    if not prog.empty and closed.any():
-        save_store(prog[~closed], PROG_STORE)
-        prog = prog[~closed]
-        st.info("월 마감 실적이 등록된 월의 진척도 데이터가 자동 정리되었습니다.")
-
-    if prog.empty:
-        return st.info("좌측 ⏱️ 영역에서 당월 오더/출고 데이터('마감 여부' 컬럼 포함)를 업로드해주세요. 계획은 히스토리에 등록된 해당월 계획을 자동으로 사용합니다.")
-
-    p_months = sorted(prog['기준월'].unique())
-    month = st.selectbox("📅 진척도 대상월", p_months, index=len(p_months) - 1)
-    # 기간 한정 규칙 적용 (KDH 한시 통합, 시작월부터 제외 — 저장 원본은 불변)
-    prog_m = apply_period_rules(prog[prog['기준월'] == month], 'actual')
-    if prog_m.empty:
-        return st.info("기간 한정 규칙 적용 후 남은 진척도 데이터가 없습니다.")
-
-    # 마감 여부 선택 (기본: 해당월 출고 확정만)
-    statuses = sorted(prog_m['마감여부'].unique())
-    try:
-        mnum = str(int(month[5:7]))
-    except Exception:
-        mnum = ''
-    default_sel = [s for s in statuses if '확정' in s and (mnum and f"{mnum}월" in s)]
-    if not default_sel:
-        default_sel = [s for s in statuses if '확정' in s] or statuses
-    sel_status = st.multiselect("✅ 집계에 포함할 '마감 여부' 상태", statuses, default=default_sel)
-    st.caption("💡 기본값(해당월 출고 확정)은 확정 오더 기준 실적입니다. '출고 미확정' 등을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량이 됩니다.")
-    if not sel_status:
-        return st.warning("집계할 마감 여부 상태를 1개 이상 선택해주세요.")
-
-    prog_sel = prog_m[prog_m['마감여부'].isin(sel_status)].groupby(GROUP_COLS, as_index=False)['실적수량'].sum()
-
-    # 계획: 히스토리 저장소의 해당월 계획을 자동 사용 (기간 한정 규칙 동일 적용)
-    plan_store = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
-    plan_rows = apply_period_rules(plan_store[plan_store['기준월'] == month], 'plan')
-    plan_m = plan_rows.groupby(GROUP_COLS, as_index=False)['계획수량'].sum()
-    if plan_m.empty:
-        st.warning(f"⚠️ 히스토리에 {month} 계획이 없습니다. 좌측 📚 영역에서 해당월 계획을 먼저 반영해주세요. (아래는 실적만 표시됩니다)")
-
-    merged = pd.merge(plan_m, prog_sel, on=GROUP_COLS, how='outer').fillna(0)
-
-    # 품목마스터 정보 부착 + 제외 품목/미상 정리 (히스토리 뷰와 동일 기준)
-    item_info, final_drop_codes = load_item_info_and_dropcodes(file_mtime(item_master_path), file_mtime(exclusion_path))
-    merged = pd.merge(merged, item_info, on='제품코드', how='left')
-    merged['제품명'] = merged['제품명'].fillna('품목마스터 누락')
-    merged['국가'] = merged['국가'].fillna('미분류')
-    merged = merged[~merged['제품코드'].isin(final_drop_codes)]
-    for col in GROUP_COLS + ['제품명']:
-        merged = merged[merged[col] != '미상']
-
-    if merged.empty:
-        return st.info("집계 가능한 데이터가 없습니다.")
-
-    # 국가 필터 (USA/MEX/CAN 등 복수 선택·해제)
-    all_countries = sorted(merged['국가'].unique())
-    sel_countries = st.multiselect("🌍 국가 필터", all_countries, default=all_countries, key="prog_country")
-    merged = merged[merged['국가'].isin(sel_countries)]
-    if merged.empty:
-        return st.info("선택한 국가에 해당하는 데이터가 없습니다.")
-
-    fmt_cols = ['계획', '실적', '진척도', 'GAP']
-
-    # --- ① 품목별 진척도 ---
-    st.markdown("---")
-    st.markdown(f"##### ① 품목별 진척도 ({month}, 진척도 = 실적 ÷ 계획, 오름차순)")
-    prod = merged.groupby(['제품코드', '제품명'], as_index=False)[['계획수량', '실적수량']].sum()
-    prod['진척도'] = [compute_progress(p, a) for p, a in zip(prod['계획수량'], prod['실적수량'])]
-    prod['GAP'] = prod['계획수량'] - prod['실적수량']
-    prod = prod.sort_values('진척도', na_position='last')
-    prod_disp = prod.rename(columns={'계획수량': '계획', '실적수량': '실적'})[['제품코드', '제품명'] + fmt_cols].reset_index(drop=True)
-    # 계획 없이 실적 발생(진척도 ∞) 품목 행은 옅은 붉은색 처리
-    inf_rows_prod = set(prod_disp.index[np.isinf(prod_disp['진척도'].fillna(0))])
-
-    def highlight_prod(row):
-        if row.name in inf_rows_prod:
-            return ['background-color: #fbe9e9; color: #000000'] * len(row)
-        return [''] * len(row)
-
-    h1 = min(520, 37 * (len(prod_disp) + 1) + 12)
-    st.dataframe(prod_disp.style.format(build_format_dict(fmt_cols)).apply(highlight_prod, axis=1),
-                 width=df_width(len(prod_disp.columns)), hide_index=True, height=h1,
-                 column_config=col_cfg(len(prod_disp.columns), PROG_TABLE_CONFIG))
-    t_plan, t_act = prod['계획수량'].sum(), prod['실적수량'].sum()
-    render_total_row(['제품코드', '제품명'], fmt_cols,
-                     [t_plan, t_act, compute_progress(t_plan, t_act), t_plan - t_act],
-                     col_config=PROG_TABLE_CONFIG)
-
-    # --- ② 진척도 하위 품목 딥다이브 ---
-    st.markdown("---")
-    st.markdown("##### ② 진척도 하위 품목 상세 (제품 × 영업부 × 지점 × 사원)")
-    thr = st.number_input("진척도 X% 이하 품목만 (100=전체)", min_value=0, max_value=500, value=100, step=5, key="prog_thr")
-    # 진척도 무한대(계획 없이 실적 발생) 품목은 항상 리스트 맨 아래에 붉은색으로 포함
-    low_codes = prod[prod['진척도'].fillna(np.inf) <= thr / 100]['제품코드'].tolist()   # 유한 진척도만
-    inf_codes = prod[np.isinf(prod['진척도'].fillna(0))]['제품코드'].tolist()          # 계획 0 & 실적 발생
-    list_codes = low_codes + inf_codes
-    low_df = merged[merged['제품코드'].isin(list_codes)]
-    if low_df.empty:
-        st.info("조건에 해당하는 품목이 없습니다.")
-        return
-    st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞)입니다.")
-
-    org_cols = ['영업부명', '영업지점명', '영업사원명']
-    detail = low_df.groupby(['제품코드', '제품명'] + org_cols, as_index=False)[['계획수량', '실적수량']].sum()
-    detail['진척도'] = [compute_progress(p, a) for p, a in zip(detail['계획수량'], detail['실적수량'])]
-    detail['GAP'] = detail['계획수량'] - detail['실적수량']
-
-    label_cols = ['제품코드', '제품명'] + org_cols
-    rows, subtotal_pos, inf_pos = [], [], set()
-    prod_low = prod[prod['제품코드'].isin(list_codes)]  # 진척도 오름차순 → ∞ 품목이 자동으로 맨 아래
-    inf_code_set = set(inf_codes)
-    for _, srow in prod_low.iterrows():
-        is_inf = srow['제품코드'] in inf_code_set
-        block = detail[detail['제품코드'] == srow['제품코드']].sort_values('진척도', na_position='last')
-        if block.empty:
-            continue
-        for _, r in block.iterrows():
-            rows.append([r[c] for c in label_cols] + [r['계획수량'], r['실적수량'], r['진척도'], r['GAP']])
-            if is_inf:
-                inf_pos.add(len(rows) - 1)
-        rows.append([srow['제품코드'], srow['제품명'], '📍 제품 소계', '', '']
-                    + [srow['계획수량'], srow['실적수량'], srow['진척도'], srow['GAP']])
-        subtotal_pos.append(len(rows) - 1)
-        if is_inf:
-            inf_pos.add(len(rows) - 1)
-
-    result = pd.DataFrame(rows, columns=label_cols + fmt_cols)
-
-    def highlight(row):
-        if row.name in subtotal_pos and row.name in inf_pos:
-            return ['background-color: #f2c9c9; font-weight: bold; color: #000000'] * len(row)
-        if row.name in subtotal_pos:
-            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
-        if row.name in inf_pos:
-            return ['background-color: #fbe9e9; color: #000000'] * len(row)
-        return [''] * len(row)
-
-    styled = result.style.format(build_format_dict(fmt_cols)).apply(highlight, axis=1)
-    h2 = min(520, 37 * (len(result) + 1) + 12)
-    st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h2,
-                 column_config=col_cfg(len(result.columns), PROG_TABLE_CONFIG))
-    d_plan, d_act = detail['계획수량'].sum(), detail['실적수량'].sum()
-    render_total_row(label_cols, fmt_cols,
-                     [d_plan, d_act, compute_progress(d_plan, d_act), d_plan - d_act],
-                     col_config=PROG_TABLE_CONFIG)
-
-    # --- ③ 선택 품목의 지점·사원별 GAP ---
-    st.markdown("---")
-    st.markdown("##### ③ 선택 품목 기준 지점 · 영업사원별 GAP (GAP 큰 순)")
-    st.caption("💡 위 ②에서 지정한 진척도 조건에 걸린 품목들만 집계한 GAP입니다. GAP = 계획 - 실적 (양수 = 미달). "
-               "②에 리스트업된 제품 중 진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외했습니다.")
-    gap_df = merged[merged['제품코드'].isin(low_codes)]  # ∞ 품목 제외 (유한 진척도 품목만)
-    if gap_df.empty:
-        return st.info("GAP 집계 대상 품목이 없습니다. (∞ 품목 제외 기준)")
-    pg = gap_df.groupby(['영업지점명', '영업사원명'], as_index=False)[['계획수량', '실적수량']].sum()
-    pg['GAP'] = pg['계획수량'] - pg['실적수량']
-    bg = gap_df.groupby(['영업지점명'], as_index=False)[['계획수량', '실적수량']].sum()
-    bg['GAP'] = bg['계획수량'] - bg['실적수량']
-
-    g_cols = ['계획', '실적', 'GAP']
-    rows3, subtotal_pos3 = [], []
-    for _, brow in bg.sort_values('GAP', ascending=False).iterrows():
-        b = brow['영업지점명']
-        ppl = pg[pg['영업지점명'] == b].sort_values('GAP', ascending=False)
-        for _, prow in ppl.iterrows():
-            rows3.append([b, prow['영업사원명'], prow['계획수량'], prow['실적수량'], prow['GAP']])
-        rows3.append([b, '📍 지점 소계', brow['계획수량'], brow['실적수량'], brow['GAP']])
-        subtotal_pos3.append(len(rows3) - 1)
-
-    result3 = pd.DataFrame(rows3, columns=['영업지점명', '영업사원명'] + g_cols)
-
-    def highlight3(row):
-        if row.name in subtotal_pos3:
-            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
-        return [''] * len(row)
-
-    styled3 = result3.style.format(build_format_dict(g_cols)).apply(highlight3, axis=1)
-    h3 = min(520, 37 * (len(result3) + 1) + 12)
-    st.dataframe(styled3, width=df_width(len(result3.columns)), hide_index=True, height=h3,
-                 column_config=col_cfg(len(result3.columns), PROG_TABLE_CONFIG))
-    render_total_row(['영업지점명', '영업사원명'], g_cols,
-                     [pg['계획수량'].sum(), pg['실적수량'].sum(), pg['계획수량'].sum() - pg['실적수량'].sum()],
-                     col_config=PROG_TABLE_CONFIG)
 
 
 # =============================================================
@@ -2176,15 +2794,17 @@ if master_ready and item_master_ready and exclusion_ready:
                               file_mtime(item_master_path), file_mtime(exclusion_path),
                               PERIOD_RULES_KEY)
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 1. 제품별 실적 뷰",
         "🏢 2. 영업조직별 실적 뷰",
         "🛠️ 3. 상세 분석 (조직/사원별 딥다이브)",
         "📈 4. 전월 대비 개선 (사원별)",
         "⏱️ 5. 당월 진척도",
-        "💰 6. 월 목표 대비 진척현황"
+        "💰 6. 월 목표 대비 진척현황",
+        "🔮 7. 미래 계획 검증"
     ])
 
+    sel_countries = None
     if raw_df is None or raw_df.empty:
         with tab1:
             st.info("좌측 📚 영역에서 계획/실적 데이터를 히스토리에 반영해주세요. 한 번 반영하면 재업로드 없이 계속 표시됩니다.")
@@ -2200,7 +2820,6 @@ if master_ready and item_master_ready and exclusion_ready:
         available_months = sorted([m for m in raw_df['기준월'].unique() if pd.notna(m) and str(m).strip() != ''])
         if len(available_months) >= 2:
             # 🎯 보유 월 목록이 바뀌면 키가 달라져 슬라이더가 전체 범위로 자동 재설정됨
-            #    (키가 없으면 이전 세션의 선택 범위가 남아 새로 추가된 월이 안 보이는 문제)
             start_month, end_month = st.select_slider(
                 "📅 조회할 월(Month) 범위를 지정하세요",
                 options=available_months,
@@ -2215,14 +2834,13 @@ if master_ready and item_master_ready and exclusion_ready:
 
         selected_months = [m for m in available_months if start_month <= m <= end_month]
 
-        # 🎯 국가는 포함 선택만으로 제어, 품목 상세 필터는 탭3 딥다이브 검색으로 대체
         col1, col2 = st.columns(2)
         with col1:
             all_countries = sorted(raw_df['국가'].unique())
             sel_countries = st.multiselect("🌍 국가 포함", all_countries, default=all_countries)
         with col2:
             all_codes = sorted(raw_df['제품코드'].unique())
-            exclude_codes = st.multiselect("❌ 제외할 제품코드/품목 (화면 임시 제외)", all_codes, default=[])
+            exclude_codes = st.multiselect("❌ 제외할 제품코드/품목", all_codes, default=[])
 
         filtered_df = raw_df[
             (raw_df['기준월'].isin(selected_months)) &
@@ -2242,8 +2860,7 @@ if master_ready and item_master_ready and exclusion_ready:
             create_styled_pivot(filtered_df, ['영업부명', '영업지점명'], selected_months, acc_mode='item_avg')
 
         with tab3:
-            st.markdown("##### 영업부/지점/사원을 좁혀가며, 문제 품목과 담당자를 딥다이브 하세요.")
-            # 🎯 [추가됨] 평가 제외 조직(EVAL_EXCLUDE_ORGS)은 상세 분석에서 제외
+            st.markdown("##### 영업부/지점/사원을 좁혀가며, 이슈를 딥다이브.")
             t3_base = filtered_df[
                 (~filtered_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
                 (~filtered_df['영업지점명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS))
@@ -2264,7 +2881,6 @@ if master_ready and item_master_ready and exclusion_ready:
                 t3_person = st.selectbox("▶ 영업사원 선택", person_opts)
             t3_df = branch_df if t3_person == '(전체)' else branch_df[branch_df['영업사원명'] == t3_person]
 
-            # 🎯 딥다이브 전용 필터 (상단 멀티선택 없이 간편 검색)
             st.markdown("###### 🔎 품목 딥다이브 필터")
             d_col1, d_col2 = st.columns([2, 1])
             with d_col1:
@@ -2274,7 +2890,7 @@ if master_ready and item_master_ready and exclusion_ready:
                 )
             with d_col2:
                 acc_threshold = st.number_input(
-                    "정확도 하위 필터 (기간 평균 %가 이 값 미만인 품목만, 100=전체)",
+                    "정확도 하위 필터 (100=전체)",
                     min_value=0, max_value=100, value=100, step=5
                 )
 
@@ -2297,12 +2913,11 @@ if master_ready and item_master_ready and exclusion_ready:
 
             st.markdown("---")
             st.markdown("##### 👥 지점별 · 영업사원별 정확도/GAP 요약")
-            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준이며, 사원 드롭다운과 무관하게 선택 지점 내 전체 사원을 비교합니다. 품목 필터를 걸면 '그 품목들에 대해 누가 문제인지' 바로 보입니다. 정렬: 가장 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균(사원 1명=1표).")
+            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준. 품목 필터를 걸면 '그 품목들에 대해 어디가 이슈인지' 분석. 정렬: 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균.")
             render_person_summary(summary_base, selected_months)
 
             st.markdown("---")
             st.markdown("##### 📋 상세 테이블 (제품 소계 + 정확도 오름차순)")
-            # 🎯 행 구성은 고정. 정렬 기준월만 선택 (기간을 넓혀도 원하는 달 기준 정렬 유지)
             sort_opts = ['(최근 월 자동)'] + selected_months
             s_col1, _s2 = st.columns([1, 3])
             with s_col1:
@@ -2312,16 +2927,13 @@ if master_ready and item_master_ready and exclusion_ready:
                        "📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). "
                        "정렬은 위에서 고른 기준월의 정확도 오름차순(기본값은 조회 기간 중 최근 월). "
                        "🖱️ **표의 행을 클릭하면 그 제품·지점·사원의 거래처별 계획/실적 내역이 팝업으로 열립니다** "
-                       "(📍 제품 소계 행을 클릭하면 그 제품의 전체 거래처가 표시됩니다). "
-                       "하단 전체 평균 = 표시된 세부 행들의 평균이라, 위 요약표의 사원 기준 평균과 다를 수 있음.")
+                       "(📍 제품 소계 행을 클릭하면 그 제품의 전체 거래처가 표시됩니다).")
 
             render_detail_table(t3_filtered, ['제품코드', '제품명', '영업지점명', '영업사원명'],
                                 selected_months, sort_month=sort_month, popup_df=t3_all)
 
         with tab4:
             st.markdown("##### 전월 대비 정확도/GAP 개선 (영업사원별)")
-            # 국가/제외 품목 필터는 적용하되, 월은 상단 슬라이더와 무관하게 자체 선택
-            # 🎯 [추가됨] 평가 제외 조직(EVAL_EXCLUDE_ORGS)은 개선 평가에서 제외
             imp_base = raw_df[
                 (raw_df['국가'].isin(sel_countries)) &
                 (~raw_df['제품코드'].isin(exclude_codes)) &
@@ -2333,12 +2945,27 @@ if master_ready and item_master_ready and exclusion_ready:
             render_improvement_tab(imp_base, available_months)
 
     with tab5:
-        st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검용)")
+        st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검)")
         render_progress_tab()
 
     with tab6:
         st.markdown("##### 월 영업목표 대비 실적 현황 (금액 기준)")
         render_goal_tab()
+
+    with tab7:
+        st.markdown("##### 미래 수요계획 정합성 검증 (과거 판매 대비)")
+        _plan_all = apply_period_rules(load_store(PLAN_STORE, PLAN_COLS, '계획수량'), 'plan')
+        try:
+            _item_info, _drop = load_item_info_and_dropcodes(file_mtime(item_master_path),
+                                                             file_mtime(exclusion_path))
+            _plan_all = _plan_all[~_plan_all['제품코드'].isin(_drop)]
+        except Exception:
+            _item_info = pd.DataFrame(columns=['제품코드', '제품명', '국가'])
+        if sel_countries is None:
+            _countries = sorted(_item_info['국가'].dropna().unique())
+        else:
+            _countries = list(sel_countries)
+        render_future_tab(_plan_all, _item_info, _countries)
 
 else:
     st.info("하단 ⚙️ 마스터 데이터 3종을 먼저 등록. 등록 후 좌측 📚 영역에서 계획/실적을 히스토리에 반영하면, 재업로드 없이 대시보드 표시됨")
