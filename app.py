@@ -169,6 +169,14 @@ MONTHLY_PLAN_MERGE = {
 MONTHLY_EXCLUSIONS = {
     '101070076': '2026-07',
 }
+# [코드 통합 · 시작월부터 계속] 원래코드: (통합코드, 시작월)
+#   시작월부터 계획·실적·진척도가 통합코드로 합산되고 원래코드는 화면에서 사라진다.
+#   시작월 이전 과거 데이터는 전혀 건드리지 않는다(정확도 히스토리 보존).
+#   ※ 미래 계획 검증(탭7)에서는 대상월이 시작월 이후이면 과거 평균·전년 동월도
+#     두 코드를 합산해 비교한다(같은 제품을 코드만 바꾼 것이므로).
+ONGOING_CODE_MERGE = {
+    '101001911': ('101007351', '2026-09'),   # 생생우동 구형 → 신형 통합 ('26.9월부터)
+}
 # [조직 통합] 영업부명/영업지점명에 나타나는 명칭을 통합 명칭으로 변경 (전 기간 · 전체 탭 적용)
 ORG_NAME_MERGE = {
     'E-Commerce Project A': 'E-Commerce',
@@ -205,6 +213,12 @@ def apply_period_rules(df, kind):
                 move_mask = (df['기준월'] == m) & (df['제품코드'] == src)
                 df.loc[move_mask, '제품코드'] = dst          # 단독 입력 거래처: 통합코드로 이관
 
+    # 코드 통합(시작월부터 계속): 계획·실적·진척도 공통 적용
+    for src_code, (dst_code, start) in ONGOING_CODE_MERGE.items():
+        mask = (df['제품코드'] == src_code) & (df['기준월'] >= start)
+        if mask.any():
+            df.loc[mask, '제품코드'] = dst_code
+
     for code, start in MONTHLY_EXCLUSIONS.items():
         df = df[~((df['제품코드'] == code) & (df['기준월'] >= start))]
 
@@ -220,6 +234,7 @@ def apply_period_rules(df, kind):
 PERIOD_RULES_KEY = (str(sorted(MONTHLY_ACTUAL_MERGE.items())) + '|'
                     + str(sorted(MONTHLY_PLAN_MERGE.items())) + '|'
                     + str(sorted(MONTHLY_EXCLUSIONS.items())) + '|'
+                    + str(sorted(ONGOING_CODE_MERGE.items())) + '|'
                     + str(sorted(ORG_NAME_MERGE.items())) + '|'
                     + str(sorted(EVAL_EXCLUDE_ORGS)))
 
@@ -1211,9 +1226,31 @@ def compute_reference(sales, target_month, kinds=('전년 동월', '3개월 평�
     return out
 
 
+def merge_codes_for_target(sales, target_month):
+    """미래 계획 검증용: 대상월이 통합 시작월 이후이면, 과거 실적도 두 코드를 합산한다.
+       (같은 제품을 코드만 바꾼 것이므로 과거 판매 이력도 통합해서 비교해야 함)"""
+    if sales is None or sales.empty or not ONGOING_CODE_MERGE:
+        return sales
+    out = sales
+    changed = False
+    for src_code, (dst_code, start) in ONGOING_CODE_MERGE.items():
+        if target_month and str(target_month) >= start:
+            mask = out['제품코드'] == src_code
+            if mask.any():
+                if not changed:
+                    out = out.copy()
+                    changed = True
+                out.loc[mask, '제품코드'] = dst_code
+    if changed:
+        gcols = [c for c in ['기준월', '거래처 코드', '제품코드'] if c in out.columns]
+        out = out.groupby(gcols, as_index=False)['실적수량'].sum()
+    return out
+
+
 def build_future_table(plan_df, sales, target_month, keys=('제품코드',), anchor_month=None):
     """대상월 계획 + 비교 기준값 + 각 기준 대비 GAP + 가중 GAP"""
     keys = list(keys)
+    sales = merge_codes_for_target(sales, target_month)   # 대상월 기준 코드 통합 반영
     p = plan_df[plan_df['기준월'] == target_month]
     p = p.groupby(keys, as_index=False)['계획수량'].sum() if not p.empty \
         else pd.DataFrame(columns=keys + ['계획수량'])
@@ -1265,7 +1302,8 @@ def render_future_chart(plan_df, sales, months, anchor_month, chart_key):
 
     ly, avg3, avg6, avg12 = [], [], [], []
     for m in months:
-        refs = compute_reference(sales, m, anchor_month=anchor_month, keys=('제품코드',))
+        refs = compute_reference(merge_codes_for_target(sales, m), m,
+                                 anchor_month=anchor_month, keys=('제품코드',))
         ly.append(float(refs.get('전년 동월', pd.DataFrame({'값': []}))['값'].sum()) if '전년 동월' in refs else 0.0)
         avg3.append(float(refs.get('3개월 평균', pd.DataFrame({'값': []}))['값'].sum()) if '3개월 평균' in refs else 0.0)
         avg6.append(float(refs.get('6개월 평균', pd.DataFrame({'값': []}))['값'].sum()) if '6개월 평균' in refs else 0.0)
@@ -1346,7 +1384,7 @@ def render_future_tab(plan_df, item_info, sel_countries):
     st.markdown("---")
     st.markdown("##### ① 월별 총 계획량 vs 과거 판매")
     st.caption("💡 계획(파랑 Bar) / 전년 동월(회색 Bar) / 3·6·12개월 평균(선). "
-               "범례를 클릭하면 선을 켜고 끌 수 있습니다(6·12개월 평균은 기본 숨김).")
+               "범례 클릭 시 선 On/Off.")
     render_future_chart(plan_df, sales, sel_months, anchor_month, chart_key='fut_chart')
 
     # --- ② 품목별 ---
@@ -1365,8 +1403,8 @@ def render_future_tab(plan_df, item_info, sel_countries):
                                         "제외 품목 리스트에 넣지 않으므로, 나중에 계획이 잡히면 즉시 다시 나타납니다.")
     wtxt = ' · '.join(f"{k} {int(v*100)}%" for k, v in FUTURE_WEIGHTS.items())
     st.caption(f"💡 가중 GAP = 계획 − 가중 기준값 (가중치: {wtxt}). "
-               "양수(빨강)는 과거 대비 과다 계획, 음수(파랑)는 과소 계획입니다. "
-               "해당 기준의 과거 실적이 없으면 그 기준은 가중치에서 자동 제외됩니다.")
+               "빨강은 과거 대비 과다 계획, 파랑은 과소 계획. "
+               "과거 실적 없으면 그 기준은 가중치에서 자동 제외.")
 
     t = build_future_table(plan_df, sales, month_pick, keys=('제품코드',), anchor_month=anchor_month)
     t = t.merge(item_info[['제품코드', '제품명']], on='제품코드', how='left')
@@ -1385,8 +1423,8 @@ def render_future_tab(plan_df, item_info, sel_countries):
         _n_dormant = int(dormant.sum())
         t = t[~dormant]
         if _n_dormant:
-            st.caption(f"ℹ️ 운영 중단으로 보이는 품목 {_n_dormant}건을 숨겼습니다 "
-                       "(계획·최근 3개월·6개월 실적이 모두 0). 위 체크를 해제하면 볼 수 있습니다.")
+            st.caption(f"ℹ️ 운영 중단으로 보이는 품목 {_n_dormant}건 숨김. "
+                       "(계획·최근 3개월·6개월 실적 모두 0). 위 체크를 해제하면 조회 가능.")
     if t.empty:
         return st.info("조건에 해당하는 품목이 없습니다. (소량 품목 기준을 낮춰보세요)")
 
@@ -1472,6 +1510,7 @@ def compute_max_12m(sales, anchor_month, code, cust=None):
 def render_future_ref_chart(plan_df, sales, month_pick, anchor_month, code, cust=None, chart_key='fc'):
     """계획 / 전년 동월 / 3·6·12개월 평균 / 12개월 단월 최대 를 비교하는 막대 차트"""
     keys = ('제품코드', '거래처 코드') if cust else ('제품코드',)
+    sales = merge_codes_for_target(sales, month_pick)     # 대상월 기준 코드 통합 반영
     t = build_future_table(plan_df, sales, month_pick, keys=keys, anchor_month=anchor_month)
     t = t[t['제품코드'] == code]
     if cust:
@@ -1510,8 +1549,8 @@ def render_future_ref_chart(plan_df, sales, month_pick, anchor_month, code, cust
     st.plotly_chart(fig, width='stretch', key=chart_key)
     if mx_month:
         st.caption(f"💡 12개월 MAX = 최근 12개월 중 단월 최대 판매({mx_month}). "
-                   "프로모션으로 튀는 품목은 평균보다 이 값과 비교해 계획의 타당성을 판단하세요. "
-                   "(차트에만 표시되며 가중 GAP 계산에는 반영되지 않습니다)")
+                   "프로모션 품목은 이 값과 비교해 계획의 타당성 가늠. "
+                   "(차트에만 표시되며 가중 GAP 계산에는 미반영)")
 
 
 def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname, fmt, hl):
@@ -1642,10 +1681,10 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
             st.session_state['fut_cust_pick'] = picked_code
             st.rerun()
 
-    st.caption("💡 표에서 거래처 행을 클릭하면 위 차트가 그 거래처 기준으로 바뀝니다(📍 소계 행 제외). "
-               "📍 소계 = 체인(또는 담당자) 합계이며 배수는 합계 기준으로 재계산됩니다. "
-               "⚠️ 계획 누락 = 과거 판매가 있었는데 이번 계획이 없는 거래처 / 🆕 실적 없음 = 과거 판매 없이 계획만. "
-               "영업부·지점·사원은 현재 영업마스터 기준입니다.")
+    st.caption("💡 표의 거래처 행 클릭 시 위 차트가 그 거래처 기준으로 변경(📍 소계 행 제외). "
+               "📍 소계 = 거래처(또는 담당자) 합계이며 배수는 합계 기준으로 재계산. "
+               "⚠️ 계획 누락 = 과거 판매 있으나 계획이 없는 거래처 / 🆕 실적 없음 = 과거 판매 없이 계획만. "
+               "영업부·지점·사원은 현재 영업마스터 기준.")
 
 
 # =============================================================
@@ -2693,8 +2732,8 @@ if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("📦 과거 판매 이력 (계획 검증 전용)")
     st.sidebar.caption("'25.1월~'26.3월 등 과거 출고 실적. 미래 계획 검증에만 사용되며, "
-                       "탭1~4의 수요계획 정확도에는 전혀 반영되지 않습니다. "
-                       "여러 번 나눠 올려도 되며 같은 월은 교체됩니다.")
+                       "탭1~4의 수요계획 정확도에는 미반영. "
+                       "여러 번 나눠 올려도 되며 같은 월은 교체됨.")
 
     hist_file = st.sidebar.file_uploader("9. 과거 판매 이력", type=['xlsx', 'csv'], key="up_hist")
     hist_replace = st.sidebar.checkbox("올린 월만 교체(권장) / 해제 시 전체 교체", value=True, key="hist_mode")
@@ -2955,8 +2994,8 @@ if master_ready and item_master_ready and exclusion_ready:
             st.caption("💡 행 구성: 제품코드 · 제품명 · 영업지점명 · 영업사원명 (고정) / 정확도 = 해당 행의 품목별 정확도 평균 / "
                        "📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). "
                        "정렬은 위에서 고른 기준월의 정확도 오름차순(기본값은 조회 기간 중 최근 월). "
-                       "🖱️ **표의 행을 클릭하면 그 제품·지점·사원의 거래처별 계획/실적 내역이 팝업으로 열립니다** "
-                       "(📍 제품 소계 행을 클릭하면 그 제품의 전체 거래처가 표시됩니다).")
+                       "🖱️ **표의 행 클릭 시 그 제품·지점·사원의 거래처별 계획/실적 내역이 팝업으로 열림** "
+                       "(📍 제품 소계 클릭 시 그 제품의 전체 거래처 표시).")
 
             render_detail_table(t3_filtered, ['제품코드', '제품명', '영업지점명', '영업사원명'],
                                 selected_months, sort_month=sort_month, popup_df=t3_all)
