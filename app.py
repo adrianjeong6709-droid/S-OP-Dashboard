@@ -185,19 +185,21 @@ ORG_NAME_MERGE = {
 #  → 탭1·2의 전체 실적 집계에는 그대로 포함됨
 EVAL_EXCLUDE_ORGS = ['NSA HQ']
 
-def apply_period_rules(df, kind):
-    """기간 한정 규칙 적용 (표시용, 원본 불변). kind: 'plan' 또는 'actual'"""
+def apply_period_rules(df, kind, monthly_merge=True):
+    """기간 한정 규칙 적용 (표시용, 원본 불변). kind: 'plan' 또는 'actual'
+       monthly_merge=False면 '특정 월 한정' 통합(MONTHLY_ACTUAL/PLAN_MERGE)을 적용하지 않는다.
+       → 미래 계획 검증의 과거 판매 기준처럼, 일회성 평가 보정을 섞으면 안 되는 곳에서 사용."""
     if df is None or df.empty or '기준월' not in df.columns or '제품코드' not in df.columns:
         return df
     df = df.copy()
 
-    if kind == 'actual':
+    if kind == 'actual' and monthly_merge:
         for (m, src), dst in MONTHLY_ACTUAL_MERGE.items():
             mask = (df['기준월'] == m) & (df['제품코드'] == src)
             if mask.any():
                 df.loc[mask, '제품코드'] = dst
 
-    if kind == 'plan':
+    if kind == 'plan' and monthly_merge:
         for (m, src), (dst, mode) in MONTHLY_PLAN_MERGE.items():
             src_mask = (df['기준월'] == m) & (df['제품코드'] == src)
             if not src_mask.any():
@@ -946,9 +948,9 @@ def render_goal_tab():
         month = st.selectbox("📅 대상월", months, index=default_idx, key="goal_month")
     with c2:
         st.caption(f"📌 보유 빌링 데이터: **{', '.join(data_months) if data_months else '없음'}** / 기준일자: **{snap or '미등록'}** — "
-                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료를 함께 올려주세요. 금액 단위 USD. "
+                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료 함께 업로드 필요. 금액 단위 USD. "
                    "주차는 월요일 시작이며 월 경계(1일·말일)에서 잘립니다. 라벨은 각 구간의 시작일 기준이라 "
-                   "월초·월말의 짧은 조각 주는 그 조각의 첫날로 표기됩니다.")
+                   "월초·월말의 짧은 조각 주는 그 조각의 첫날로 표기.")
 
     # 🎯 선택한 달의 데이터만 사용 (월별 히스토리에서 추출)
     bill = bill[bill['기준월'] == month].copy()
@@ -1063,7 +1065,7 @@ def render_goal_tab():
             base = base.drop(columns=[bx, am])
     hidden_n = len(weeks) - len(kept_weeks)
     if hidden_n:
-        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개는 숨겼습니다 "
+        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개 숨김처리 "
                    "(해당 주차 오더는 이미 Billing 완료·출고 완료에 반영됨).")
 
     # --- 행 구성: 영업부별 지점 → 영업부 합계 → 총 합계 ---
@@ -1128,6 +1130,25 @@ FUTURE_WEIGHTS = {'전년 동월': 0.30, '3개월 평균': 0.40, '6개월 평균
 FUTURE_MIN_PLAN_DEFAULT = 1000     # 소량 품목 숨김 기본값(박스)
 FUTURE_MIN_PLAN_STEP = 100         # ± 버튼 조절 단위
 
+# 🎯 [조절용] 거래처별 계획 검증 팝업 표 설정
+#    SHOW_CUSTOMER_CODE = False 로 두면 거래처 코드 컬럼을 숨겨 가로 폭을 아낀다.
+#    폭(px)은 아래 숫자만 바꾸면 즉시 반영된다.
+SHOW_CUSTOMER_CODE = False
+FUTC_COL_WIDTH = {
+    '거래처 코드': 98,
+    '거래처명': 181,
+    '영업지점명': 100,
+    '영업사원명': 119,
+    '상태': 90,
+    '_값': 92,      # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 기준 / 가중 GAP 공통
+    '배수': 63,
+}
+
+# 🎯 팝업(dialog) 폭 확장 CSS — Streamlit 기본 'large'보다 넓게 (가로 스크롤 최소화)
+WIDE_DIALOG_CSS = """<style>
+div[data-testid="stDialog"] div[role="dialog"] { width: 95vw !important; max-width: 1750px !important; }
+</style>"""
+
 # [거래처 그룹] 거래처명 앞 N개 단어가 같으면 같은 체인으로 묶음 (예: 'COSTCO WHOLESALE LA/NW' → 2)
 CUSTOMER_GROUP_WORDS = 2
 # 자동 규칙으로 안 맞는 예외는 여기에 (거래처명 일부 또는 거래처 코드 → 그룹명)
@@ -1169,7 +1190,9 @@ def build_sales_base(hist_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
 
     act = load_store(ACT_STORE, ACT_COLS, '실적수량')
     if not act.empty:
-        act = apply_period_rules(act, 'actual')
+        # 🎯 월 한정 보정(예: 7월 KDH 결품 통합)은 '평가용 일회성 조정'이므로
+        #    과거 판매 기준에는 적용하지 않는다. (제품별 실제 판매량을 그대로 봐야 함)
+        act = apply_period_rules(act, 'actual', monthly_merge=False)
         act = act[['기준월', '거래처 코드', '제품코드', '실적수량']]
     else:
         act = pd.DataFrame(columns=['기준월', '거래처 코드', '제품코드', '실적수량'])
@@ -1384,7 +1407,7 @@ def render_future_tab(plan_df, item_info, sel_countries):
     st.markdown("---")
     st.markdown("##### ① 월별 총 계획량 vs 과거 판매")
     st.caption("💡 계획(파랑 Bar) / 전년 동월(회색 Bar) / 3·6·12개월 평균(선). "
-               "범례 클릭 시 선 On/Off.")
+               "범례 클릭 시 선(Line) 활성화(6·12개월 평균은 기본 숨김).")
     render_future_chart(plan_df, sales, sel_months, anchor_month, chart_key='fut_chart')
 
     # --- ② 품목별 ---
@@ -1403,8 +1426,8 @@ def render_future_tab(plan_df, item_info, sel_countries):
                                         "제외 품목 리스트에 넣지 않으므로, 나중에 계획이 잡히면 즉시 다시 나타납니다.")
     wtxt = ' · '.join(f"{k} {int(v*100)}%" for k, v in FUTURE_WEIGHTS.items())
     st.caption(f"💡 가중 GAP = 계획 − 가중 기준값 (가중치: {wtxt}). "
-               "빨강은 과거 대비 과다 계획, 파랑은 과소 계획. "
-               "과거 실적 없으면 그 기준은 가중치에서 자동 제외.")
+               "양수(빨강)는 과거 대비 과다 계획, 음수(파랑)는 과소 계획입니다. "
+               "해당 기준의 과거 실적이 없으면 그 기준은 가중치에서 자동 제외됩니다.")
 
     t = build_future_table(plan_df, sales, month_pick, keys=('제품코드',), anchor_month=anchor_month)
     t = t.merge(item_info[['제품코드', '제품명']], on='제품코드', how='left')
@@ -1423,8 +1446,8 @@ def render_future_tab(plan_df, item_info, sel_countries):
         _n_dormant = int(dormant.sum())
         t = t[~dormant]
         if _n_dormant:
-            st.caption(f"ℹ️ 운영 중단으로 보이는 품목 {_n_dormant}건 숨김. "
-                       "(계획·최근 3개월·6개월 실적 모두 0). 위 체크를 해제하면 조회 가능.")
+            st.caption(f"ℹ️ 운영 중단으로 보이는 품목 {_n_dormant}건 숨김처리 "
+                       "(계획·최근 3개월·6개월 실적 모두 0).")
     if t.empty:
         return st.info("조건에 해당하는 품목이 없습니다. (소량 품목 기준을 낮춰보세요)")
 
@@ -1549,13 +1572,13 @@ def render_future_ref_chart(plan_df, sales, month_pick, anchor_month, code, cust
     st.plotly_chart(fig, width='stretch', key=chart_key)
     if mx_month:
         st.caption(f"💡 12개월 MAX = 최근 12개월 중 단월 최대 판매({mx_month}). "
-                   "프로모션 품목은 이 값과 비교해 계획의 타당성 가늠. "
-                   "(차트에만 표시되며 가중 GAP 계산에는 미반영)")
+                   "프로모션으 품목은 이 값과 비교해 계획의 타당성 가늠. ")
 
 
 def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname, fmt, hl):
     """선택 품목의 거래처별 계획 vs 과거 판매.
        상단 차트는 기본 '품목 전체', 거래처를 고르면 그 거래처 기준으로 전환"""
+    st.markdown(WIDE_DIALOG_CSS, unsafe_allow_html=True)   # 팝업 폭 확장
     st.markdown(f"##### 🧾 거래처별 상세 — {code} {pname} ({month_pick})")
 
     ct = build_future_table(plan_df, sales, month_pick, keys=('제품코드', '거래처 코드'),
@@ -1620,8 +1643,8 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
 
     if grp_mode == '묶지 않음':
         d = sort_key(ct)
-        rows = [[r['거래처 코드'], r['거래처명'], r['영업사원명'], r['상태']] + [r[c] for c in vcols]
-                for _, r in d.iterrows()]
+        rows = [[r['거래처 코드'], r['거래처명'], r['영업지점명'], r['영업사원명'], r['상태']]
+                + [r[c] for c in vcols] for _, r in d.iterrows()]
         sub_pos = []
     else:
         gcol = '거래처그룹' if grp_mode == '거래처 그룹' else '영업사원명'
@@ -1635,13 +1658,16 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
         for _, grow in g.iterrows():
             blk = sort_key(ct[ct[gcol] == grow[gcol]])
             for _, r in blk.iterrows():
-                rows.append([r['거래처 코드'], r['거래처명'], r['영업사원명'], r['상태']] + [r[c] for c in vcols])
+                rows.append([r['거래처 코드'], r['거래처명'], r['영업지점명'], r['영업사원명'], r['상태']]
+                            + [r[c] for c in vcols])
             if len(blk) > 1 or grp_mode == '거래처 그룹':
-                rows.append(['', f"📍 {grow[gcol]} 소계", '', ''] + [grow[c] for c in vcols])
+                rows.append(['', f"📍 {grow[gcol]} 소계", '', '', ''] + [grow[c] for c in vcols])
                 sub_pos.append(len(rows) - 1)
 
-    ccols = ['거래처 코드', '거래처명', '영업사원명', '상태'] + vcols
+    ccols = ['거래처 코드', '거래처명', '영업지점명', '영업사원명', '상태'] + vcols
     cdisp = pd.DataFrame(rows, columns=ccols)
+    if not SHOW_CUSTOMER_CODE:
+        cdisp = cdisp.drop(columns=['거래처 코드'])   # 가로 폭 절약 (설정으로 다시 켤 수 있음)
 
     def hl2(row):
         if row.name in sub_pos:
@@ -1651,12 +1677,15 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
     h2 = min(520, 37 * (len(cdisp) + 1) + 12)
     # 🎯 컬럼 폭: 상태를 영업사원명과 비슷하게, 라벨 컬럼은 왼쪽 고정
     try:
-        cfg2 = {
-            '거래처 코드': st.column_config.Column(width=110, pinned=True),
-            '거래처명': st.column_config.Column(width=200, pinned=True),
-            '영업사원명': st.column_config.Column(width=120),
-            '상태': st.column_config.Column(width=120),
-        }
+        cfg2 = {}
+        if SHOW_CUSTOMER_CODE:
+            cfg2['거래처 코드'] = st.column_config.Column(width=FUTC_COL_WIDTH['거래처 코드'], pinned=True)
+        cfg2['거래처명'] = st.column_config.Column(width=FUTC_COL_WIDTH['거래처명'], pinned=True)
+        for _c in ['영업지점명', '영업사원명', '상태']:
+            cfg2[_c] = st.column_config.Column(width=FUTC_COL_WIDTH[_c])
+        for _c in vcols:
+            cfg2[_c] = st.column_config.Column(
+                width=FUTC_COL_WIDTH['배수'] if _c == '배수' else FUTC_COL_WIDTH['_값'])
     except TypeError:
         cfg2 = None
 
@@ -1676,14 +1705,15 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
     except Exception:
         p3 = []
     if p3 and p3[0] < len(cdisp):
-        picked_code = str(cdisp.iloc[p3[0]]['거래처 코드']).strip()
+        # 코드 컬럼을 숨겨도 선택이 동작하도록 원본 rows에서 코드를 읽는다
+        picked_code = str(rows[p3[0]][0]).strip()
         if picked_code and picked_code != st.session_state.get('fut_cust_pick'):
             st.session_state['fut_cust_pick'] = picked_code
             st.rerun()
 
-    st.caption("💡 표의 거래처 행 클릭 시 위 차트가 그 거래처 기준으로 변경(📍 소계 행 제외). "
+    st.caption("💡 표의 거래처 행 클릭 시 차트가 그 거래처 기준 변화(📍 소계 행 제외). "
                "📍 소계 = 거래처(또는 담당자) 합계이며 배수는 합계 기준으로 재계산. "
-               "⚠️ 계획 누락 = 과거 판매 있으나 계획이 없는 거래처 / 🆕 실적 없음 = 과거 판매 없이 계획만. "
+               "⚠️ 계획 누락 = 판매가 있었는데 계획이 없는 거래처 / 🆕 실적 없음 = 과거 판매 없이 계획만. "
                "영업부·지점·사원은 현재 영업마스터 기준.")
 
 
@@ -2018,6 +2048,7 @@ def render_trend_chart(d, months_list, chart_key):
 
 def render_customer_detail(df, months_list, code, pname, branch, person):
     """months_list가 None이면 데이터에 존재하는 전체 기간(히스토리)을 사용"""
+    st.markdown(WIDE_DIALOG_CSS, unsafe_allow_html=True)   # 팝업 폭 확장
     title = f"{code} {pname}"
     scope = ' · '.join([x for x in [branch, person] if x])
 
@@ -2724,7 +2755,7 @@ if IS_ADMIN:
             if ok:
                 save_meta('기준일자', snap_date)
                 save_meta('대상월', tgt_m)
-                st.sidebar.success(f"{tgt_m} 반영 완료 [{' + '.join(msgs)}] — 다른 달 데이터는 그대로 보존됩니다.")
+                st.sidebar.success(f"{tgt_m} 반영 완료 [{' + '.join(msgs)}] — 다른 달 데이터는 그대로 보존.")
                 st.rerun()
 
 # --- 과거 판매 이력 (계획 검증 전용) ---
@@ -2733,7 +2764,7 @@ if IS_ADMIN:
     st.sidebar.header("📦 과거 판매 이력 (계획 검증 전용)")
     st.sidebar.caption("'25.1월~'26.3월 등 과거 출고 실적. 미래 계획 검증에만 사용되며, "
                        "탭1~4의 수요계획 정확도에는 미반영. "
-                       "여러 번 나눠 올려도 되며 같은 월은 교체됨.")
+                       "여러 번 나눠 올려도 되며 같은 월은 교체.")
 
     hist_file = st.sidebar.file_uploader("9. 과거 판매 이력", type=['xlsx', 'csv'], key="up_hist")
     hist_replace = st.sidebar.checkbox("올린 월만 교체(권장) / 해제 시 전체 교체", value=True, key="hist_mode")
@@ -2994,8 +3025,8 @@ if master_ready and item_master_ready and exclusion_ready:
             st.caption("💡 행 구성: 제품코드 · 제품명 · 영업지점명 · 영업사원명 (고정) / 정확도 = 해당 행의 품목별 정확도 평균 / "
                        "📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). "
                        "정렬은 위에서 고른 기준월의 정확도 오름차순(기본값은 조회 기간 중 최근 월). "
-                       "🖱️ **표의 행 클릭 시 그 제품·지점·사원의 거래처별 계획/실적 내역이 팝업으로 열림** "
-                       "(📍 제품 소계 클릭 시 그 제품의 전체 거래처 표시).")
+                       "🖱️ **표의 행 클릭 시 그 제품·지점·사원의 거래처별 계획/실적 내역 팝업으로 조회** "
+                       "(📍 제품 소계 행 클릭 시 그 제품의 전체 거래처 표시).")
 
             render_detail_table(t3_filtered, ['제품코드', '제품명', '영업지점명', '영업사원명'],
                                 selected_months, sort_month=sort_month, popup_df=t3_all)
@@ -3022,7 +3053,8 @@ if master_ready and item_master_ready and exclusion_ready:
 
     with tab7:
         st.markdown("##### 미래 수요계획 정합성 검증 (과거 판매 대비)")
-        _plan_all = apply_period_rules(load_store(PLAN_STORE, PLAN_COLS, '계획수량'), 'plan')
+        _plan_all = apply_period_rules(load_store(PLAN_STORE, PLAN_COLS, '계획수량'), 'plan',
+                                       monthly_merge=False)
         try:
             _item_info, _drop = load_item_info_and_dropcodes(file_mtime(item_master_path),
                                                              file_mtime(exclusion_path))
