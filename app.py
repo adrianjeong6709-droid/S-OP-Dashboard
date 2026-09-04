@@ -57,7 +57,14 @@ PROGRESS_COL_CONFIG = {
     "계획": st.column_config.Column(width=110),
     "실적": st.column_config.Column(width=110),
     "진척도": st.column_config.Column(width=95),
-    "GAP": st.column_config.Column(width=110)
+    "GAP": st.column_config.Column(width=110),
+    # 미확정 / 합계 시나리오 컬럼 (기존과 동일 폭)
+    "미확정": st.column_config.Column(width=110),
+    "미확정 진척도": st.column_config.Column(width=95),
+    "합계 실적": st.column_config.Column(width=110),
+    "합계 진척도": st.column_config.Column(width=95),
+    "합계 GAP": st.column_config.Column(width=110),
+    "차월확정": st.column_config.Column(width=110),
 }
 # 진척도 탭 표에 실제 적용되는 통합 설정 (공통 + 전용)
 PROG_TABLE_CONFIG = {**COMMON_COL_CONFIG, **PROGRESS_COL_CONFIG}
@@ -540,8 +547,32 @@ def apply_adjustment(adj_file):
 # =============================================================
 # 히스토리 → 분석용 데이터프레임 (기존 comparison_df와 동일 구조)
 # =============================================================
+# 🎯 [추가됨] 조직(영업부·지점·사원)을 '현재 영업마스터' 기준으로 다시 붙인다.
+#    히스토리에는 업로드 시점의 담당자가 저장되어 있지만, 화면에서는 항상 현 담당 기준으로 통일한다.
+#    (인수인계로 담당이 바뀌어도 한 사람의 거래처 흐름이 끊기지 않게 하기 위함. 저장 원본은 불변)
+REMAP_ORG_TO_CURRENT = True
+
+def remap_org_current(df, master_mtime=None):
+    if not REMAP_ORG_TO_CURRENT or df is None or df.empty or '거래처 코드' not in df.columns:
+        return df
+    try:
+        ml = load_master_lookup(master_mtime if master_mtime is not None else file_mtime(master_path))
+    except Exception:
+        return df
+    if ml is None or ml.empty:
+        return df
+    out = df.copy()
+    cur = out[['거래처 코드']].merge(ml, on='거래처 코드', how='left')
+    for c in ['영업부명', '영업지점명', '영업사원명']:
+        if c in out.columns:
+            new_v = cur[c].values
+            # 현재 마스터에 없는 거래처는 기존 값을 유지 (과거 거래 종료 거래처 등)
+            out[c] = np.where(pd.isna(new_v), out[c].values, new_v)
+    return out
+
+
 @st.cache_data
-def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
+def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime, rules_key, master_mtime=0.0):
     plan = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
     act = load_store(ACT_STORE, ACT_COLS, '실적수량')
     if plan.empty and act.empty:
@@ -557,6 +588,10 @@ def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
         else pd.DataFrame(columns=['기준월'] + GROUP_COLS + ['실적수량'])
 
     comparison_df = pd.merge(plan_g, act_g, on=['기준월'] + GROUP_COLS, how='outer').fillna(0)
+    # 🎯 조직을 현재 마스터 기준으로 통일한 뒤 재집계
+    comparison_df = remap_org_current(comparison_df, master_mtime)
+    comparison_df = comparison_df.groupby(['기준월'] + GROUP_COLS, as_index=False)[
+        ['계획수량', '실적수량']].sum()
 
     item_info, final_drop_codes = load_item_info_and_dropcodes(file_mtime(item_master_path), file_mtime(exclusion_path))
     comparison_df = pd.merge(comparison_df, item_info, on='제품코드', how='left')
@@ -948,9 +983,9 @@ def render_goal_tab():
         month = st.selectbox("📅 대상월", months, index=default_idx, key="goal_month")
     with c2:
         st.caption(f"📌 보유 빌링 데이터: **{', '.join(data_months) if data_months else '없음'}** / 기준일자: **{snap or '미등록'}** — "
-                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료 함께 업로드 필요. 금액 단위 USD. "
+                   "빌링완료·빌링전 두 파일은 반드시 같은 시점 자료를 함께 올려주세요. 금액 단위 USD. "
                    "주차는 월요일 시작이며 월 경계(1일·말일)에서 잘립니다. 라벨은 각 구간의 시작일 기준이라 "
-                   "월초·월말의 짧은 조각 주는 그 조각의 첫날로 표기.")
+                   "월초·월말의 짧은 조각 주는 그 조각의 첫날로 표기됩니다.")
 
     # 🎯 선택한 달의 데이터만 사용 (월별 히스토리에서 추출)
     bill = bill[bill['기준월'] == month].copy()
@@ -1065,7 +1100,7 @@ def render_goal_tab():
             base = base.drop(columns=[bx, am])
     hidden_n = len(weeks) - len(kept_weeks)
     if hidden_n:
-        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개 숨김처리 "
+        st.caption(f"ℹ️ 출고 확정 물량이 남아있지 않은 주차 {hidden_n}개는 숨겼습니다 "
                    "(해당 주차 오더는 이미 Billing 완료·출고 완료에 반영됨).")
 
     # --- 행 구성: 영업부별 지점 → 영업부 합계 → 총 합계 ---
@@ -1130,18 +1165,131 @@ FUTURE_WEIGHTS = {'전년 동월': 0.30, '3개월 평균': 0.40, '6개월 평균
 FUTURE_MIN_PLAN_DEFAULT = 1000     # 소량 품목 숨김 기본값(박스)
 FUTURE_MIN_PLAN_STEP = 100         # ± 버튼 조절 단위
 
+# =============================================================
+# 🎯 [추가됨] 신제품 관리 (수요계획 / 공급량 / 출고량 / 기초재고)
+# =============================================================
+NEWPROD_STORE = os.path.join(HIST_DIR, "newproduct.csv")
+NEWPROD_COLS = ['제품코드', '제품명', '기준월', '수요계획', '공급량', '출고량', '기초재고']
+# 엑셀 하위 헤더 → 내부 명칭
+NEWPROD_FIELD_MAP = {'수요계획': '수요계획', '입고': '공급량', '출고': '출고량', '기말재고': '기말재고'}
+NEWPROD_MONTH_ABBR = {m: i + 1 for i, m in enumerate(
+    ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'])}
+
+
+def parse_newprod_month(label, base_year):
+    """'Jan' / 'Jan 2026' / '1월' / '2026-01' 등 → 'YYYY-MM'"""
+    s = str(label).replace('\xa0', ' ').strip()
+    if not s or s.lower().startswith('unnamed'):
+        return None
+    m = re.fullmatch(r'(\d{4})[-/.](\d{1,2})', s)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}"
+    m = re.fullmatch(r'(\d{1,2})\s*월', s)
+    if m:
+        return f"{base_year}-{int(m.group(1)):02d}"
+    m = re.match(r'([A-Za-z]{3})[a-z]*\.?\s*(\d{4})?', s)
+    if m and m.group(1).upper() in NEWPROD_MONTH_ABBR:
+        yr = m.group(2) or base_year
+        return f"{yr}-{NEWPROD_MONTH_ABBR[m.group(1).upper()]:02d}"
+    return None
+
+
+def process_newprod_upload(f, base_year):
+    """신제품 관리 엑셀(2행 병합 헤더) → 롱포맷.
+       기말재고는 '다음 달 기초재고'로 이동해 저장한다."""
+    raw = pd.read_excel(f, header=None, dtype=object)
+    if raw.empty:
+        return None, "빈 파일입니다."
+
+    # 'Material'이 있는 행을 헤더 시작으로 자동 탐색 (위에 제목 줄이 몇 개 있어도 무관)
+    hdr = None
+    for i in range(min(30, len(raw))):
+        vals = [str(v).strip().upper() for v in raw.iloc[i].tolist() if pd.notna(v)]
+        if 'MATERIAL' in vals:
+            hdr = i
+            break
+    if hdr is None:
+        return None, "'Material' 헤더를 찾지 못했습니다. 파일 양식을 확인해주세요."
+
+    top = raw.iloc[hdr].tolist()          # 월 (병합 → 첫 칸에만 값)
+    sub = raw.iloc[hdr + 1].tolist()      # 수요계획 / 입고 / 출고 / 기말재고
+    body = raw.iloc[hdr + 2:].reset_index(drop=True)
+
+    # 병합 헤더 복원: 월 이름을 오른쪽으로 채움
+    cur, months = None, []
+    for v in top:
+        s = '' if pd.isna(v) else str(v).strip()
+        if s and not s.lower().startswith('unnamed'):
+            cur = s
+        months.append(cur)
+
+    code_i = name_i = None
+    for i, v in enumerate(top):
+        s = '' if pd.isna(v) else str(v).strip().upper()
+        if s == 'MATERIAL' and code_i is None:
+            code_i = i
+        elif 'DESCRIPTION' in s and name_i is None:
+            name_i = i
+    if code_i is None:
+        return None, "'Material' 컬럼을 찾지 못했습니다."
+    if name_i is None:
+        name_i = code_i + 1
+
+    # (열 인덱스 → 기준월, 항목) 매핑
+    cells = {}
+    for i, sv in enumerate(sub):
+        s = '' if pd.isna(sv) else str(sv).strip()
+        fld = NEWPROD_FIELD_MAP.get(s)
+        if not fld:
+            continue
+        mm = parse_newprod_month(months[i], base_year)
+        if mm:
+            cells[i] = (mm, fld)
+    if not cells:
+        return None, "월별 항목(수요계획/입고/출고/기말재고)을 찾지 못했습니다."
+
+    recs, new_seq = [], 0
+    for _, row in body.iterrows():
+        code = str(row[code_i]).strip() if pd.notna(row[code_i]) else ''
+        name = str(row[name_i]).strip() if pd.notna(row[name_i]) else ''
+        if not name or name.lower() == 'nan':
+            continue
+        if name.replace(' ', '') in ('총합계', '합계', 'Total', 'TOTAL'):
+            continue
+        if not code or code.lower() in ('nan', 'new'):
+            new_seq += 1
+            code = f"NEW-{new_seq:02d}"          # 코드 미정 품목
+        vals = {}
+        for i, (mm, fld) in cells.items():
+            v = row[i] if i < len(row) else None
+            q = float(to_num([v])[0]) if pd.notna(v) else 0.0
+            vals.setdefault(mm, {})[fld] = q
+        for mm, d in vals.items():
+            recs.append({'제품코드': code, '제품명': name, '기준월': mm,
+                         '수요계획': d.get('수요계획', 0.0), '공급량': d.get('공급량', 0.0),
+                         '출고량': d.get('출고량', 0.0), '_기말재고': d.get('기말재고', 0.0)})
+    if not recs:
+        return None, "인식된 데이터 행이 없습니다."
+
+    out = pd.DataFrame(recs).sort_values(['제품코드', '기준월'])
+    # 기말재고 → 다음 달 기초재고
+    out['기초재고'] = out.groupby('제품코드')['_기말재고'].shift(1).fillna(0.0)
+    out = out.drop(columns=['_기말재고'])
+    return out[NEWPROD_COLS].reset_index(drop=True), None
+
+
 # 🎯 [조절용] 거래처별 계획 검증 팝업 표 설정
 #    SHOW_CUSTOMER_CODE = False 로 두면 거래처 코드 컬럼을 숨겨 가로 폭을 아낀다.
 #    폭(px)은 아래 숫자만 바꾸면 즉시 반영된다.
 SHOW_CUSTOMER_CODE = False
 FUTC_COL_WIDTH = {
-    '거래처 코드': 98,
-    '거래처명': 181,
-    '영업지점명': 100,
-    '영업사원명': 119,
-    '상태': 90,
-    '_값': 92,      # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 기준 / 가중 GAP 공통
-    '배수': 63,
+    '거래처 코드': 100,
+    '거래처명': 190,
+    '영업지점명': 110,
+    '영업사원명': 105,
+    '상태': 105,
+    '_값': 108,      # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 기준 / 가중 GAP 공통
+    '배수': 80,
 }
 
 # 🎯 팝업(dialog) 폭 확장 CSS — Streamlit 기본 'large'보다 넓게 (가로 스크롤 최소화)
@@ -1407,7 +1555,7 @@ def render_future_tab(plan_df, item_info, sel_countries):
     st.markdown("---")
     st.markdown("##### ① 월별 총 계획량 vs 과거 판매")
     st.caption("💡 계획(파랑 Bar) / 전년 동월(회색 Bar) / 3·6·12개월 평균(선). "
-               "범례 클릭 시 선(Line) 활성화(6·12개월 평균은 기본 숨김).")
+               "범례를 클릭하면 선을 켜고 끌 수 있습니다(6·12개월 평균은 기본 숨김).")
     render_future_chart(plan_df, sales, sel_months, anchor_month, chart_key='fut_chart')
 
     # --- ② 품목별 ---
@@ -1446,8 +1594,8 @@ def render_future_tab(plan_df, item_info, sel_countries):
         _n_dormant = int(dormant.sum())
         t = t[~dormant]
         if _n_dormant:
-            st.caption(f"ℹ️ 운영 중단으로 보이는 품목 {_n_dormant}건 숨김처리 "
-                       "(계획·최근 3개월·6개월 실적 모두 0).")
+            st.caption(f"ℹ️ 운영 중단으로 보이는 품목 {_n_dormant}건을 숨겼습니다 "
+                       "(계획·최근 3개월·6개월 실적이 모두 0). 위 체크를 해제하면 볼 수 있습니다.")
     if t.empty:
         return st.info("조건에 해당하는 품목이 없습니다. (소량 품목 기준을 낮춰보세요)")
 
@@ -1572,7 +1720,8 @@ def render_future_ref_chart(plan_df, sales, month_pick, anchor_month, code, cust
     st.plotly_chart(fig, width='stretch', key=chart_key)
     if mx_month:
         st.caption(f"💡 12개월 MAX = 최근 12개월 중 단월 최대 판매({mx_month}). "
-                   "프로모션으 품목은 이 값과 비교해 계획의 타당성 가늠. ")
+                   "프로모션으로 튀는 품목은 평균보다 이 값과 비교해 계획의 타당성을 판단하세요. "
+                   "(차트에만 표시되며 가중 GAP 계산에는 반영되지 않습니다)")
 
 
 def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname, fmt, hl):
@@ -1711,10 +1860,10 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
             st.session_state['fut_cust_pick'] = picked_code
             st.rerun()
 
-    st.caption("💡 표의 거래처 행 클릭 시 차트가 그 거래처 기준 변화(📍 소계 행 제외). "
-               "📍 소계 = 거래처(또는 담당자) 합계이며 배수는 합계 기준으로 재계산. "
-               "⚠️ 계획 누락 = 판매가 있었는데 계획이 없는 거래처 / 🆕 실적 없음 = 과거 판매 없이 계획만. "
-               "영업부·지점·사원은 현재 영업마스터 기준.")
+    st.caption("💡 표에서 거래처 행을 클릭하면 위 차트가 그 거래처 기준으로 바뀝니다(📍 소계 행 제외). "
+               "📍 소계 = 체인(또는 담당자) 합계이며 배수는 합계 기준으로 재계산됩니다. "
+               "⚠️ 계획 누락 = 과거 판매가 있었는데 이번 계획이 없는 거래처 / 🆕 실적 없음 = 과거 판매 없이 계획만. "
+               "영업부·지점·사원은 현재 영업마스터 기준입니다.")
 
 
 # =============================================================
@@ -1805,8 +1954,8 @@ def build_format_dict(cols):
             format_dict[c] = lambda x: '-' if pd.isna(x) else ('∞' if np.isinf(x) else f"{x*100:.1f}%")
         elif '정확도' in c:
             format_dict[c] = lambda x: '-' if pd.isna(x) else f"{x*100:.1f}%"
-        elif ('계획' in c) or ('실적' in c) or ('GAP' in c):
-            format_dict[c] = lambda x: '-' if pd.isna(x) or x == 0 else f"{int(x):,}"
+        elif ('계획' in c) or ('실적' in c) or ('GAP' in c) or ('미확정' in c) or ('확정' in c) or ('수량' in c):
+            format_dict[c] = lambda x: '-' if pd.isna(x) or x == 0 else f"{int(round(x)):,}"
     return format_dict
 
 
@@ -1925,8 +2074,11 @@ def render_total_row(label_cols, value_cols, totals, table_key=None, col_config=
         lambda x: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(x), axis=1
     )
     n = len(label_cols) + len(value_cols)
-    st.dataframe(styled, width=df_width(n), hide_index=True,
-                 column_config=col_cfg(n, col_config))
+    # col_config가 명시되면 컬럼 수와 무관하게 그대로 적용 (진척도 탭처럼 폭을 고정해야 하는 표)
+    if col_config is not None:
+        st.dataframe(styled, width='content', hide_index=True, column_config=col_config)
+    else:
+        st.dataframe(styled, width=df_width(n), hide_index=True, column_config=col_cfg(n))
 
 
 # 🎯 탭3 상단: 지점별 → 영업사원별 정확도/GAP 요약표 (지점 소계 + 전체 합계/평균)
@@ -2392,6 +2544,59 @@ def render_improvement_tab(df, available_months):
                  column_config=col_cfg(len(total_df.columns)))
 
 
+# 🎯 [추가됨] 미확정 오더 상세: 그 품목의 미확정 물량이 어느 거래처·영업사원에 있는지
+def render_undecided_detail(prog_m, undecided_status, next_status, month, code, pname, show_next=False):
+    st.markdown(WIDE_DIALOG_CSS, unsafe_allow_html=True)
+    st.markdown(f"##### ⏳ 미확정 오더 상세 — {code} {pname} ({month})")
+    st.caption("오더는 생성됐으나 출고 일정이 잡히지 않은 물량입니다. 아래 거래처·담당자를 대상으로 "
+               "출고 일정 확정을 독려하면 당월 진척도를 끌어올릴 수 있습니다.")
+
+    d = prog_m[(prog_m['제품코드'] == code) & (prog_m['마감여부'].isin(undecided_status))]
+    if d.empty:
+        st.info("이 품목에는 미확정 오더가 없습니다.")
+    else:
+        g = d.groupby(['영업지점명', '영업사원명', '거래처 코드'], as_index=False)['실적수량'].sum()
+        names = load_customer_names(file_mtime(master_path))
+        g['거래처명'] = g['거래처 코드'].astype(str).map(names).fillna('(이름 없음)') if names else ''
+        g = g.rename(columns={'실적수량': '미확정 수량'}).sort_values('미확정 수량', ascending=False)
+        show = g[['거래처명', '영업지점명', '영업사원명', '미확정 수량']].reset_index(drop=True)
+        h = min(420, 37 * (len(show) + 1) + 12)
+        try:
+            _c = {'거래처명': st.column_config.Column(width=200),
+                  '영업지점명': st.column_config.Column(width=100),
+                  '영업사원명': st.column_config.Column(width=95),
+                  '미확정 수량': st.column_config.Column(width=105)}
+        except TypeError:
+            _c = None
+        st.dataframe(show.style.format({'미확정 수량': lambda x: f"{int(round(x)):,}"}),
+                     width='content', hide_index=True, height=h, column_config=_c)
+        st.caption(f"합계 {int(g['미확정 수량'].sum()):,} 박스 / {len(g)}개 거래처")
+
+    if show_next and next_status:
+        n = prog_m[(prog_m['제품코드'] == code) & (prog_m['마감여부'].isin(next_status))]
+        st.markdown("###### 📅 차월 이후 출고 확정분 (당월 집계 제외 · 참고용)")
+        if n.empty:
+            st.info("차월 이후로 확정된 오더가 없습니다.")
+        else:
+            gn = n.groupby(['마감여부', '영업지점명', '영업사원명', '거래처 코드'],
+                           as_index=False)['실적수량'].sum()
+            names = load_customer_names(file_mtime(master_path))
+            gn['거래처명'] = gn['거래처 코드'].astype(str).map(names).fillna('(이름 없음)') if names else ''
+            gn = gn.rename(columns={'실적수량': '수량', '마감여부': '출고 예정'}).sort_values('수량', ascending=False)
+            showg = gn[['출고 예정', '거래처명', '영업지점명', '영업사원명', '수량']].reset_index(drop=True)
+            hn = min(320, 37 * (len(showg) + 1) + 12)
+            try:
+                _cn = {'출고 예정': st.column_config.Column(width=110),
+                       '거래처명': st.column_config.Column(width=200),
+                       '영업지점명': st.column_config.Column(width=100),
+                       '영업사원명': st.column_config.Column(width=95),
+                       '수량': st.column_config.Column(width=95)}
+            except TypeError:
+                _cn = None
+            st.dataframe(showg.style.format({'수량': lambda x: f"{int(round(x)):,}"}),
+                         width='content', hide_index=True, height=hn, column_config=_cn)
+
+
 # =============================================================
 # 🎯 탭5: 당월 진척도 렌더링
 # =============================================================
@@ -2410,32 +2615,62 @@ def render_progress_tab():
 
     p_months = sorted(prog['기준월'].unique())
     month = st.selectbox("📅 진척도 대상월", p_months, index=len(p_months) - 1)
+    _upd = load_meta('진척도갱신')
+    if _upd:
+        st.markdown(f"<span style='color:#888888; font-size:0.78rem;'>데이터 갱신: {_upd}</span>",
+                    unsafe_allow_html=True)
     prog_m = apply_period_rules(prog[prog['기준월'] == month], 'actual')
+    prog_m = remap_org_current(prog_m)          # 조직을 현재 마스터 기준으로 통일
     if prog_m.empty:
         return st.info("기간 한정 규칙 적용 후 남은 진척도 데이터가 없습니다.")
 
+    # 🎯 마감여부 3분류: 당월 확정 / 미확정 / 차월 이후 확정
     statuses = sorted(prog_m['마감여부'].unique())
     try:
         mnum = str(int(month[5:7]))
     except Exception:
         mnum = ''
-    default_sel = [s for s in statuses if '확정' in s and (mnum and f"{mnum}월" in s)]
-    if not default_sel:
-        default_sel = [s for s in statuses if '확정' in s] or statuses
-    sel_status = st.multiselect("✅ 집계에 포함할 오더 상태", statuses, default=default_sel)
-    st.caption("💡 기본값은 확정 오더 기준 실적. '출고 미확정' 을 추가하면 해당 오더가 전량 당월 출고된다고 가정한 예상 수량.")
-    if not sel_status:
-        return st.warning("집계할 마감 여부 상태를 1개 이상 선택해주세요.")
+    cur_default = [s for s in statuses if '확정' in s and (mnum and f"{mnum}월" in s)]
+    if not cur_default:
+        cur_default = [s for s in statuses if '확정' in s and '미확정' not in s] or statuses
 
-    prog_sel = prog_m[prog_m['마감여부'].isin(sel_status)].groupby(GROUP_COLS, as_index=False)['실적수량'].sum()
+    # 상태는 자동 분류 (당월 확정 / 미확정 / 차월 이후)
+    sel_status = cur_default
+    undecided_status = [s for s in statuses if '미확정' in s]
+    next_status = [s for s in statuses if s not in sel_status and s not in undecided_status]
+    show_next = st.checkbox("차월 이후 확정분 함께 보기", value=False, key="prog_show_next",
+                            help="다음 달로 출고가 확정된 오더. 평소에는 당월 집계에서 제외되며, "
+                                 "체크하면 참고 컬럼으로 표시됩니다.")
+    st.caption(f"💡 당월 확정: {', '.join(sel_status) or '없음'} / 미확정: {', '.join(undecided_status) or '없음'} / "
+               f"차월 이후: {', '.join(next_status) or '없음'} — "
+               "미확정은 '이 오더가 이달에 다 나가면' 기준의 예상치이며, 차월 이후 확정분은 당월 집계에서 제외됩니다.")
+
+    def _agg(sts, col):
+        d = prog_m[prog_m['마감여부'].isin(sts)]
+        if d.empty:
+            return pd.DataFrame(columns=GROUP_COLS + [col])
+        return d.groupby(GROUP_COLS, as_index=False)['실적수량'].sum().rename(columns={'실적수량': col})
+
+    prog_sel = _agg(sel_status, '실적수량')
+    prog_und = _agg(undecided_status, '미확정')
+    prog_next = _agg(next_status, '차월확정')
 
     plan_store = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
     plan_rows = apply_period_rules(plan_store[plan_store['기준월'] == month], 'plan')
+    plan_rows = remap_org_current(plan_rows)     # 조직을 현재 마스터 기준으로 통일
     plan_m = plan_rows.groupby(GROUP_COLS, as_index=False)['계획수량'].sum()
     if plan_m.empty:
         st.warning(f"⚠️ 히스토리에 {month} 계획이 없습니다. 좌측 📚 영역에서 해당월 계획을 먼저 반영해주세요.")
 
-    merged = pd.merge(plan_m, prog_sel, on=GROUP_COLS, how='outer').fillna(0)
+    merged = pd.merge(plan_m, prog_sel, on=GROUP_COLS, how='outer')
+    merged = merged.merge(prog_und, on=GROUP_COLS, how='outer')
+    merged = merged.merge(prog_next, on=GROUP_COLS, how='outer')
+    for _c in ['계획수량', '실적수량', '미확정', '차월확정']:
+        if _c not in merged.columns:
+            merged[_c] = 0.0
+    merged[['계획수량', '실적수량', '미확정', '차월확정']] = \
+        merged[['계획수량', '실적수량', '미확정', '차월확정']].fillna(0)
+    merged = merged.fillna({c: '' for c in GROUP_COLS})
 
     item_info, final_drop_codes = load_item_info_and_dropcodes(file_mtime(item_master_path), file_mtime(exclusion_path))
     merged = pd.merge(merged, item_info, on='제품코드', how='left')
@@ -2457,27 +2692,104 @@ def render_progress_tab():
     fmt_cols = ['계획', '실적', '진척도', 'GAP']
 
     st.markdown("---")
-    st.markdown(f"##### ① 품목별 진척도 ({month}, 진척도 = 실적 ÷ 계획, 오름차순)")
-    prod = merged.groupby(['제품코드', '제품명'], as_index=False)[['계획수량', '실적수량']].sum()
+    st.markdown(f"##### ① 품목별 진척도 ({month}) — 확정 기준 + 미확정 포함 시나리오")
+    prod = merged.groupby(['제품코드', '제품명'], as_index=False)[
+        ['계획수량', '실적수량', '미확정', '차월확정']].sum()
     prod['진척도'] = [compute_progress(p, a) for p, a in zip(prod['계획수량'], prod['실적수량'])]
     prod['GAP'] = prod['계획수량'] - prod['실적수량']
+    # 미확정 포함 시나리오
+    prod['미확정 진척도'] = [compute_progress(p, a) for p, a in zip(prod['계획수량'], prod['미확정'])]
+    prod['합계 실적'] = prod['실적수량'] + prod['미확정']
+    prod['합계 진척도'] = [compute_progress(p, a) for p, a in zip(prod['계획수량'], prod['합계 실적'])]
+    prod['합계 GAP'] = prod['계획수량'] - prod['합계 실적']
     prod = prod.sort_values('진척도', na_position='last')
-    prod_disp = prod.rename(columns={'계획수량': '계획', '실적수량': '실적'})[['제품코드', '제품명'] + fmt_cols].reset_index(drop=True)
+
+    # 표시 컬럼 (확정 → 미확정 → 합계 순, 색으로 블록 구분)
+    base_cols = ['제품코드', '제품명', '계획', '실적', '진척도', 'GAP']
+    und_cols = ['미확정', '미확정 진척도']
+    sum_cols = ['합계 실적', '합계 진척도', '합계 GAP']
+    nxt_cols = ['차월확정'] if show_next else []
+    prod_disp = prod.rename(columns={'계획수량': '계획', '실적수량': '실적'})[
+        base_cols + und_cols + sum_cols + nxt_cols].reset_index(drop=True)
+
     inf_rows_prod = set(prod_disp.index[np.isinf(prod_disp['진척도'].fillna(0))])
+    disp_cols = list(prod_disp.columns)
+    und_idx = {disp_cols.index(c) for c in und_cols}
+    sum_idx = {disp_cols.index(c) for c in sum_cols}
+    nxt_idx = {disp_cols.index(c) for c in nxt_cols}
 
     def highlight_prod(row):
         if row.name in inf_rows_prod:
             return ['background-color: #fbe9e9; color: #000000'] * len(row)
-        return [''] * len(row)
+        out = []
+        for i in range(len(row)):
+            if i in und_idx:
+                out.append('background-color: #ebedf0')      # 미확정: 조금 더 짙은 회색
+            elif i in sum_idx:
+                out.append('background-color: #dbe5f1')      # 합계: 옅은 남색
+            elif i in nxt_idx:
+                out.append('background-color: #f5f0e6')      # 차월: 옅은 베이지
+            else:
+                out.append('')
+        return out
+
+    fmt_all = build_format_dict(disp_cols)
 
     h1 = min(520, 37 * (len(prod_disp) + 1) + 12)
-    st.dataframe(prod_disp.style.format(build_format_dict(fmt_cols)).apply(highlight_prod, axis=1),
-                 width=df_width(len(prod_disp.columns)), hide_index=True, height=h1,
-                 column_config=col_cfg(len(prod_disp.columns), PROG_TABLE_CONFIG))
-    t_plan, t_act = prod['계획수량'].sum(), prod['실적수량'].sum()
-    render_total_row(['제품코드', '제품명'], fmt_cols,
-                     [t_plan, t_act, compute_progress(t_plan, t_act), t_plan - t_act],
-                     col_config=PROG_TABLE_CONFIG)
+    ev1, sel_ok1 = None, True
+    try:
+        ev1 = st.dataframe(prod_disp.style.format(fmt_all).apply(highlight_prod, axis=1),
+                           width='content', hide_index=True, height=h1,
+                           column_config=PROG_TABLE_CONFIG,
+                           on_select="rerun", selection_mode="single-row", key="prog_item_table")
+    except TypeError:
+        sel_ok1 = False
+        st.dataframe(prod_disp.style.format(fmt_all).apply(highlight_prod, axis=1),
+                     width='content', hide_index=True, height=h1,
+                     column_config=PROG_TABLE_CONFIG)
+    st.caption("💡 흰색=확정 기준(현재) / 회색=미확정(이 오더가 이달에 다 나갈 경우) / 남색=합계 시나리오"
+               + (" / 베이지=차월 이후 확정(당월 집계 제외, 참고용)" if show_next else "")
+               + ". 합계 진척도가 100%를 넘으면 초과 달성이므로 일부는 차월 이월을 검토하세요. "
+                 "🖱️ **품목 행을 클릭하면 그 품목의 미확정 오더가 거래처·영업사원별로 팝업 표시됩니다.**")
+
+    t_plan = prod['계획수량'].sum(); t_act = prod['실적수량'].sum()
+    t_und = prod['미확정'].sum(); t_sum = t_act + t_und
+    totals1 = [t_plan, t_act, compute_progress(t_plan, t_act), t_plan - t_act,
+               t_und, compute_progress(t_plan, t_und),
+               t_sum, compute_progress(t_plan, t_sum), t_plan - t_sum]
+    if show_next:
+        totals1.append(prod['차월확정'].sum())
+    render_total_row(['제품코드', '제품명'], disp_cols[2:], totals1, col_config=PROG_TABLE_CONFIG)
+
+    # --- 품목 선택 → 미확정 오더 딥다이브 (팝업) ---
+    try:
+        picked1 = list(ev1.selection.rows) if ev1 is not None else []
+    except Exception:
+        picked1 = []
+    with st.expander("⏳ 미확정 오더 상세 열기 (표 왼쪽 체크박스 대신 사용)", expanded=not sel_ok1):
+        opts1 = ['(선택 안 함)'] + [f"{i+1}. {r['제품코드']} {r['제품명']}"
+                                 for i, r in prod_disp.iterrows()]
+        pick1 = st.selectbox("품목 선택", opts1, index=0, key="prog_item_pick",
+                             label_visibility="collapsed")
+        if pick1 != '(선택 안 함)':
+            picked1 = [int(pick1.split('.')[0]) - 1]
+
+    if picked1 and picked1[0] < len(prod_disp):
+        _r = prod_disp.iloc[picked1[0]]
+        _code, _pname = _r['제품코드'], _r['제품명']
+        if dialog_claim('tab5_undecided', picked1) and hasattr(st, 'dialog'):
+            @st.dialog("미확정 오더 상세", width="large")
+            def _show_und():
+                render_undecided_detail(prog_m, undecided_status, next_status, month,
+                                        _code, _pname, show_next)
+                if st.button("닫기", key="prog_dlg_close"):
+                    dialog_release('tab5_undecided')
+                    st.rerun()
+            _show_und()
+        elif not hasattr(st, 'dialog'):
+            with st.expander("⏳ 미확정 오더 상세", expanded=True):
+                render_undecided_detail(prog_m, undecided_status, next_status, month,
+                                        _code, _pname, show_next)
 
     st.markdown("---")
     st.markdown("##### ② 진척도 하위 품목 상세 (제품 × 영업부 × 지점 × 사원)")
@@ -2572,6 +2884,111 @@ def render_progress_tab():
                      [pg['계획수량'].sum(), pg['실적수량'].sum(), pg['계획수량'].sum() - pg['실적수량'].sum()],
                      col_config=PROG_TABLE_CONFIG)
 
+
+
+# =============================================================
+# 🎯 [추가됨] 탭8: 신제품 계획 대비 현황
+# =============================================================
+def render_newproduct_tab():
+    npd = load_simple_store(NEWPROD_STORE, NEWPROD_COLS,
+                            ['수요계획', '공급량', '출고량', '기초재고'])
+    if npd.empty:
+        return st.info("좌측 🆕 영역에서 신제품 관리 파일을 업로드해주세요. "
+                       "(Material / Material Description + 월별 수요계획·입고·출고·기말재고)")
+
+    _upd = load_meta('신제품갱신')
+    if _upd:
+        st.markdown(f"<span style='color:#888888; font-size:0.78rem;'>데이터 갱신: {_upd}</span>",
+                    unsafe_allow_html=True)
+
+    # 제품 선택 (코드 미정 품목은 '(코드 미정)' 표기)
+    prods = npd[['제품코드', '제품명']].drop_duplicates().sort_values('제품명')
+    labels, key_map = [], {}
+    for _, r in prods.iterrows():
+        c = str(r['제품코드'])
+        lb = f"{r['제품명']} (코드 미정)" if c.startswith('NEW-') else f"{c} {r['제품명']}"
+        labels.append(lb)
+        key_map[lb] = c
+    pick = st.selectbox("🆕 제품 선택", labels, index=0, key="np_pick")
+    code = key_map[pick]
+
+    d = npd[npd['제품코드'] == code].copy()
+    d['기준월'] = d['기준월'].astype(str)
+    d = d.sort_values('기준월')
+    # 네 항목이 모두 0인 달(미출시 구간)은 숨김
+    active = (d[['수요계획', '공급량', '출고량', '기초재고']].abs().sum(axis=1) > 0)
+    d = d[active]
+    if d.empty:
+        return st.info("이 제품은 아직 계획·실적 데이터가 없습니다.")
+
+    d['GAP'] = d['수요계획'] - d['출고량']
+    months = d['기준월'].tolist()
+
+    # --- 차트 ---
+    st.markdown("##### 📈 수요계획 vs 출고량 (막대) + 기초재고 (선)")
+    if PLOTLY_OK:
+        def lab(x):
+            try:
+                return pd.to_datetime(str(x) + '-01').strftime("%b '%y")
+            except Exception:
+                return str(x)
+        ticks = [lab(x) for x in months]
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=months, y=d['수요계획'], name='수요계획', marker_color='#1E4D9A',
+                             hovertemplate='%{x}<br>수요계획: %{y:,.0f}<extra></extra>'))
+        fig.add_trace(go.Bar(x=months, y=d['출고량'], name='출고량', marker_color='#76A7E1',
+                             hovertemplate='%{x}<br>출고량: %{y:,.0f}<extra></extra>'))
+        fig.add_trace(go.Scatter(x=months, y=d['기초재고'], name='기초재고', yaxis='y2',
+                                 mode='lines+markers',
+                                 line=dict(shape='spline', smoothing=1.3, width=3, color='#4CAF7D'),
+                                 marker=dict(size=11, color='#DCF0E4',
+                                             line=dict(width=2.5, color='#4CAF7D')),
+                                 hovertemplate='%{x}<br>기초재고: %{y:,.0f}<extra></extra>'))
+        fig.update_layout(
+            barmode='group', height=360, margin=dict(l=10, r=10, t=30, b=10),
+            xaxis=dict(type='category', tickmode='array', tickvals=months, ticktext=ticks),
+            yaxis=dict(title='박스', separatethousands=True, rangemode='tozero'),
+            yaxis2=dict(title='기초재고', overlaying='y', side='right',
+                        separatethousands=True, rangemode='tozero', showgrid=False),
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+            hovermode='x unified')
+        st.plotly_chart(fig, width='stretch', key=f"np_chart_{code}")
+    else:
+        st.bar_chart(d.set_index('기준월')[['수요계획', '출고량']])
+    st.caption("💡 파란 막대(수요계획)보다 옅은 막대(출고량)가 낮으면 계획 대비 미달입니다. "
+               "초록 선(기초재고)이 계속 올라가면 계획만큼 팔리지 않아 재고가 쌓이고 있다는 뜻입니다.")
+
+    # --- 표 (구분 × 월) ---
+    st.markdown("##### 📋 월별 현황")
+    order = ['기초재고', '공급량', '출고량', '수요계획', 'GAP']
+    tbl = d.set_index('기준월')[order].T
+    tbl.columns = [str(c) for c in tbl.columns]
+    tbl['합계'] = [np.nan, d['공급량'].sum(), d['출고량'].sum(), d['수요계획'].sum(), d['GAP'].sum()]
+    tbl = tbl.reset_index().rename(columns={'index': '구분'})
+
+    def _f(x):
+        if pd.isna(x):
+            return '-'
+        return f"{int(round(x)):,}"
+    fmt_np = {c: _f for c in tbl.columns if c != '구분'}
+
+    def hl_np(row):
+        if row['구분'] == 'GAP':
+            return ['background-color: #eef2f7; font-weight: bold; color: #000000'] * len(row)
+        return [''] * len(row)
+
+    try:
+        cfg_np = {'구분': st.column_config.Column(width=95)}
+        for c in tbl.columns:
+            if c != '구분':
+                cfg_np[c] = st.column_config.Column(width=90)
+    except TypeError:
+        cfg_np = None
+    st.dataframe(tbl.style.format(fmt_np).apply(hl_np, axis=1),
+                 width='content', hide_index=True,
+                 height=37 * (len(tbl) + 1) + 12, column_config=cfg_np)
+    st.caption("💡 GAP = 수요계획 − 출고량 (양수 = 계획 대비 미달). 기초재고는 파일 값을 그대로 사용합니다. "
+               "네 항목이 모두 비어 있는 달(미출시 구간)은 표시하지 않습니다.")
 
 
 # =============================================================
@@ -2682,6 +3099,7 @@ if IS_ADMIN:
                         st.sidebar.warning(f"{tm}은 이미 월 마감 실적이 등록된 월입니다. 진척도 대상월을 확인해주세요.")
                     else:
                         save_store(parsed, PROG_STORE)
+                        save_meta('진척도갱신', pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'))
                         st.sidebar.success(f"진척도 데이터 반영 완료 (대상월: {tm})")
                         st.rerun()
 
@@ -2755,7 +3173,7 @@ if IS_ADMIN:
             if ok:
                 save_meta('기준일자', snap_date)
                 save_meta('대상월', tgt_m)
-                st.sidebar.success(f"{tgt_m} 반영 완료 [{' + '.join(msgs)}] — 다른 달 데이터는 그대로 보존.")
+                st.sidebar.success(f"{tgt_m} 반영 완료 [{' + '.join(msgs)}] — 다른 달 데이터는 그대로 보존됩니다.")
                 st.rerun()
 
 # --- 과거 판매 이력 (계획 검증 전용) ---
@@ -2763,8 +3181,8 @@ if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("📦 과거 판매 이력 (계획 검증 전용)")
     st.sidebar.caption("'25.1월~'26.3월 등 과거 출고 실적. 미래 계획 검증에만 사용되며, "
-                       "탭1~4의 수요계획 정확도에는 미반영. "
-                       "여러 번 나눠 올려도 되며 같은 월은 교체.")
+                       "탭1~4의 수요계획 정확도에는 전혀 반영되지 않습니다. "
+                       "여러 번 나눠 올려도 되며 같은 월은 교체됩니다.")
 
     hist_file = st.sidebar.file_uploader("9. 과거 판매 이력", type=['xlsx', 'csv'], key="up_hist")
     hist_replace = st.sidebar.checkbox("올린 월만 교체(권장) / 해제 시 전체 교체", value=True, key="hist_mode")
@@ -2786,6 +3204,29 @@ if IS_ADMIN:
             save_store(merged_h, SALES_HIST_STORE)
             st.sidebar.success(f"과거 판매 이력 반영 완료: {months_h[0]} ~ {months_h[-1]} "
                                f"({len(months_h)}개월 / {len(parsed_h):,}행)")
+            st.rerun()
+
+# --- 신제품 관리 데이터 ---
+if IS_ADMIN:
+    st.sidebar.divider()
+    st.sidebar.header("🆕 신제품 관리 데이터")
+    st.sidebar.caption("Material / Material Description + 월별(수요계획·입고·출고·기말재고) 2행 헤더 엑셀. "
+                       "업로드 시 전체 교체됩니다. 제목 줄이 위에 있어도 자동으로 헤더를 찾습니다.")
+    np_year = st.sidebar.number_input("기준연도 (헤더에 연도가 없을 때)", min_value=2020, max_value=2100,
+                                      value=int(pd.Timestamp.today().year), step=1, key="np_year")
+    np_file = st.sidebar.file_uploader("10. 신제품 관리 파일", type=['xlsx', 'csv'], key="up_np")
+    if np_file is not None and st.sidebar.button("✅ 신제품 데이터 반영", key="np_btn"):
+        try:
+            parsed_np, err_np = process_newprod_upload(np_file, int(np_year))
+        except Exception as e:
+            parsed_np, err_np = None, str(e)
+        if parsed_np is None or parsed_np.empty:
+            st.sidebar.error(f"신제품 데이터 반영 실패: {err_np or '인식된 데이터가 없습니다.'}")
+        else:
+            save_store(parsed_np[NEWPROD_COLS], NEWPROD_STORE)
+            save_meta('신제품갱신', pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'))
+            st.sidebar.success(f"신제품 데이터 반영 완료 ({parsed_np['제품코드'].nunique()}개 품목 / "
+                               f"{parsed_np['기준월'].nunique()}개월)")
             st.rerun()
 
 # --- 저장 현황 및 관리 ---
@@ -2820,6 +3261,11 @@ if _hist_months:
     st.sidebar.caption(f"과거 판매 이력: {_hist_months[0]} ~ {_hist_months[-1]} ({len(_hist_months)}개월)")
 else:
     st.sidebar.caption("과거 판매 이력: 없음")
+_np_store = load_simple_store(NEWPROD_STORE, NEWPROD_COLS, ['수요계획', '공급량', '출고량', '기초재고'])
+if not _np_store.empty:
+    st.sidebar.caption(f"신제품: {_np_store['제품코드'].nunique()}개 품목 (갱신 {load_meta('신제품갱신') or '-'})")
+else:
+    st.sidebar.caption("신제품: 없음")
 
 if IS_ADMIN:
     with st.sidebar.expander("🧹 특정 월 삭제 / 전체 초기화"):
@@ -2847,7 +3293,7 @@ if IS_ADMIN:
             st.caption("저장된 월이 없습니다.")
         confirm_reset = st.checkbox("전체 초기화에 동의합니다 (복구 불가)", key="reset_ok")
         if st.button("🚨 히스토리 전체 초기화", key="reset_btn") and confirm_reset:
-            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META, SALES_HIST_STORE]:
+            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META, SALES_HIST_STORE, NEWPROD_STORE]:
                 if os.path.exists(p):
                     os.remove(p)
             st.rerun()
@@ -2891,16 +3337,17 @@ else:
 if master_ready and item_master_ready and exclusion_ready:
     raw_df = build_history_df(file_mtime(PLAN_STORE), file_mtime(ACT_STORE),
                               file_mtime(item_master_path), file_mtime(exclusion_path),
-                              PERIOD_RULES_KEY)
+                              PERIOD_RULES_KEY, file_mtime(master_path))
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📊 1. 제품별 실적 뷰",
         "🏢 2. 영업조직별 실적 뷰",
         "🛠️ 3. 상세 분석 (조직/사원별 딥다이브)",
         "📈 4. 전월 대비 개선 (사원별)",
         "⏱️ 5. 당월 진척도",
         "💰 6. 월 목표 대비 진척현황",
-        "🔮 7. 미래 계획 검증"
+        "🔮 7. 미래 계획 검증",
+        "🆕 8. 신제품 현황"
     ])
 
     sel_countries = None
@@ -3012,7 +3459,8 @@ if master_ready and item_master_ready and exclusion_ready:
 
             st.markdown("---")
             st.markdown("##### 👥 지점별 · 영업사원별 정확도/GAP 요약")
-            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준. 품목 필터를 걸면 '그 품목들에 대해 어디가 이슈인지' 분석. 정렬: 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균.")
+            st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준. 품목 필터를 걸면 '그 품목들에 대해 어디가 이슈인지' 분석. 정렬: 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균. "
+                       "※ 영업부·지점·사원은 **현재 영업마스터 기준**으로 전 기간 통일 표시됩니다(담당 변경 시 과거 실적도 현 담당자 기준).")
             render_person_summary(summary_base, selected_months)
 
             st.markdown("---")
@@ -3025,8 +3473,8 @@ if master_ready and item_master_ready and exclusion_ready:
             st.caption("💡 행 구성: 제품코드 · 제품명 · 영업지점명 · 영업사원명 (고정) / 정확도 = 해당 행의 품목별 정확도 평균 / "
                        "📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). "
                        "정렬은 위에서 고른 기준월의 정확도 오름차순(기본값은 조회 기간 중 최근 월). "
-                       "🖱️ **표의 행 클릭 시 그 제품·지점·사원의 거래처별 계획/실적 내역 팝업으로 조회** "
-                       "(📍 제품 소계 행 클릭 시 그 제품의 전체 거래처 표시).")
+                       "🖱️ **표의 행을 클릭하면 그 제품·지점·사원의 거래처별 계획/실적 내역이 팝업으로 열립니다** "
+                       "(📍 제품 소계 행을 클릭하면 그 제품의 전체 거래처가 표시됩니다).")
 
             render_detail_table(t3_filtered, ['제품코드', '제품명', '영업지점명', '영업사원명'],
                                 selected_months, sort_month=sort_month, popup_df=t3_all)
@@ -3068,6 +3516,10 @@ if master_ready and item_master_ready and exclusion_ready:
         else:
             _countries = list(sel_countries)
         render_future_tab(_plan_all, _item_info, _countries)
+
+    with tab8:
+        st.markdown("##### 신제품 계획 대비 현황 (수요계획 · 공급 · 출고 · 재고)")
+        render_newproduct_tab()
 
 else:
     st.info("하단 ⚙️ 마스터 데이터 3종을 먼저 등록. 등록 후 좌측 📚 영역에서 계획/실적을 히스토리에 반영하면, 재업로드 없이 대시보드 표시됨")
