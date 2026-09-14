@@ -162,6 +162,8 @@ PRODUCT_MAPPING = {
 MONTHLY_ACTUAL_MERGE = {
     ('2026-07', '101070105'): '101004224',   # 신라면 16(4x4) KDH 실적 → 신라면 레귤러. 7월 KDH 포장재 결품 대응
     ('2026-07', '101070106'): '101003648',   # 신라면 18클럽 KDH 실적 → 18클럽 레귤러. 7월 부자재 결품 대응
+    ('2026-08', '101070106'): '101003648',   # KDH 10월 판매 개시 협의 → 8·9월은 레귤러로 출고
+    ('2026-09', '101070106'): '101003648',
 }
 # [계획] (대상월, 원래코드): (통합코드, 모드) — 해당 월에 한해 원래코드의 '계획' 처리
 #   'merge'  : 원래코드 계획을 조건 없이 통합코드로 전부 합산 (레귤러+KDH에 물량을 쪼개 입력한 경우)
@@ -171,6 +173,8 @@ MONTHLY_ACTUAL_MERGE = {
 MONTHLY_PLAN_MERGE = {
     ('2026-07', '101070105'): ('101004224', 'dedupe'),   # 신라면 16(4x4) KDH → 신라면 레귤러
     ('2026-07', '101070106'): ('101003648', 'merge'),    # 신라면 18클럽 KDH → 18클럽 레귤러 (전량 합산)
+    ('2026-08', '101070106'): ('101003648', 'merge'),    # 8·9월도 동일 (10월부터 KDH 정상 판매)
+    ('2026-09', '101070106'): ('101003648', 'merge'),
 }
 # [제외] 코드: 시작월 — 해당 월부터(이후 계속) 분석에서 제외. 시작월 이전 과거 데이터/정확도는 그대로 유지
 MONTHLY_EXCLUSIONS = {
@@ -182,7 +186,7 @@ MONTHLY_EXCLUSIONS = {
 #   ※ 미래 계획 검증(탭7)에서는 대상월이 시작월 이후이면 과거 평균·전년 동월도
 #     두 코드를 합산해 비교한다(같은 제품을 코드만 바꾼 것이므로).
 ONGOING_CODE_MERGE = {
-    '101001911': ('101007351', '2026-09'),   # 생생우동 구형 → 신형 통합 ('26.9월부터)
+    '101001911': ('101007351', '2026-08'),   # 생생우동 구형 → 신형 통합 ('26.8월부터)
 }
 # [조직 통합] 영업부명/영업지점명에 나타나는 명칭을 통합 명칭으로 변경 (전 기간 · 전체 탭 적용)
 ORG_NAME_MERGE = {
@@ -228,7 +232,13 @@ def apply_period_rules(df, kind, monthly_merge=True):
         if mask.any():
             df.loc[mask, '제품코드'] = dst_code
 
-    for code, start in MONTHLY_EXCLUSIONS.items():
+    # 시작월부터 제외: 코드 상단 하드코딩 + 제외품목 리스트 C열(시작월)
+    _excl = dict(MONTHLY_EXCLUSIONS)
+    try:
+        _excl.update(load_exclusion_rules(file_mtime(exclusion_path))[1])
+    except Exception:
+        pass
+    for code, start in _excl.items():
         df = df[~((df['제품코드'] == code) & (df['기준월'] >= start))]
 
     # 조직 통합 (전 기간): 영업부명/영업지점명 양쪽에서 명칭 치환
@@ -240,6 +250,15 @@ def apply_period_rules(df, kind, monthly_merge=True):
     return df
 
 # 규칙 변경 시 캐시가 자동 무효화되도록 캐시 키로 쓰는 문자열
+def period_rules_key():
+    try:
+        _a, _f = load_exclusion_rules(file_mtime(exclusion_path))
+        _ex = str(sorted(_f.items()))
+    except Exception:
+        _ex = ''
+    return PERIOD_RULES_KEY + '|' + _ex
+
+
 PERIOD_RULES_KEY = (str(sorted(MONTHLY_ACTUAL_MERGE.items())) + '|'
                     + str(sorted(MONTHLY_PLAN_MERGE.items())) + '|'
                     + str(sorted(MONTHLY_EXCLUSIONS.items())) + '|'
@@ -354,18 +373,54 @@ def load_customer_names(master_mtime):
 
 
 @st.cache_data
+def load_exclusion_rules(exc_mtime):
+    """제외 품목 리스트 → (전 기간 제외 코드 set, {코드: 시작월} dict)
+       C열(또는 '시작월' 컬럼)에 'YYYY-MM'이 있으면 그 달부터 제외, 비어 있으면 전 기간 제외."""
+    try:
+        exc = normalize_cols(pd.read_excel(exclusion_path))
+    except Exception:
+        return set(), {}
+    if exc.empty:
+        return set(), {}
+
+    if '제품코드' in exc.columns:
+        codes = clean_code(exc['제품코드'])
+    elif '품목코드' in exc.columns:
+        codes = clean_code(exc['품목코드'])
+    else:
+        codes = clean_code(exc.iloc[:, 0])
+
+    start_col = None
+    for cand in ['시작월', '적용시작월', '제외시작월', '적용 시작월']:
+        if cand in exc.columns:
+            start_col = exc[cand]
+            break
+    if start_col is None and exc.shape[1] >= 3:
+        start_col = exc.iloc[:, 2]          # C열
+    if start_col is None:
+        return set(codes.dropna()), {}
+
+    always, from_month = set(), {}
+    for c, s in zip(codes, start_col):
+        c = str(c).strip()
+        if not c or c.lower() == 'nan':
+            continue
+        m = parse_month(s) if pd.notna(s) else None
+        if isinstance(m, str) and re.fullmatch(r'\d{4}-\d{2}', m):
+            from_month[c] = m
+        else:
+            always.add(c)
+    return always, from_month
+
+
+@st.cache_data
 def load_item_info_and_dropcodes(item_mtime, exc_mtime):
     item_master_df = normalize_cols(pd.read_excel(item_master_path))
     item_master_df.rename(columns={item_master_df.columns[3]: '국가'}, inplace=True)
     item_master_df['제품코드'] = clean_code(item_master_df['제품코드'])
 
-    exc_df = normalize_cols(pd.read_excel(exclusion_path))
-    if '제품코드' in exc_df.columns:
-        exc_codes = clean_code(exc_df['제품코드']).tolist()
-    elif '품목코드' in exc_df.columns:
-        exc_codes = clean_code(exc_df['품목코드']).tolist()
-    else:
-        exc_codes = clean_code(exc_df.iloc[:, 0]).tolist()
+    # 전 기간 제외 코드만 사용 (시작월이 지정된 코드는 apply_period_rules에서 월별로 처리)
+    exc_codes = list(load_exclusion_rules(exc_mtime)[0])
 
     tra_mask = item_master_df.astype(str).apply(lambda x: x.str.contains('TRA.GOODS', case=False, na=False)).any(axis=1)
     udon_codes = ['101001911', '101007351', '101002381']
@@ -563,18 +618,33 @@ def remap_org_current(df, master_mtime=None):
         return df
     out = df.copy()
     cur = out[['거래처 코드']].merge(ml, on='거래처 코드', how='left')
+
+    # 재매핑 제외 대상
+    #  ① 영업기획(신제품 계획) 가상 거래처
+    #  ② 업로드 시점에 이미 '미상'이던 행 — 기존에도 화면에서 제외되던 데이터이므로
+    #     되살리면 과거 정확도가 바뀐다. 원래대로 '미상' 유지하여 기존 수치를 보존.
+    skip = pd.Series(False, index=out.index)
+    if '거래처 코드' in out.columns:
+        skip |= (out['거래처 코드'].astype(str) == NEWPROD_ORG)
+    for c in ['영업부명', '영업지점명', '영업사원명']:
+        if c in out.columns:
+            skip |= (out[c].astype(str) == '미상')
+
     for c in ['영업부명', '영업지점명', '영업사원명']:
         if c in out.columns:
             new_v = cur[c].values
-            # 현재 마스터에 없는 거래처는 기존 값을 유지 (과거 거래 종료 거래처 등)
-            out[c] = np.where(pd.isna(new_v), out[c].values, new_v)
+            keep = pd.isna(new_v) | skip.values      # 마스터에 없거나 제외 대상 → 기존 값 유지
+            out[c] = np.where(keep, out[c].values, new_v)
     return out
 
 
 @st.cache_data
-def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime, rules_key, master_mtime=0.0):
+def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime, rules_key,
+                     master_mtime=0.0, np_mtime=0.0):
     plan = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
     act = load_store(ACT_STORE, ACT_COLS, '실적수량')
+    # 🎯 신제품: 적용 시작월 이후 & 신제품 기간 내에는 영업기획 계획으로 대체
+    plan = apply_newprod_plan(plan, np_mtime)
     if plan.empty and act.empty:
         return None
 
@@ -1168,6 +1238,15 @@ FUTURE_MIN_PLAN_STEP = 100         # ± 버튼 조절 단위
 # =============================================================
 # 🎯 [추가됨] 신제품 관리 (수요계획 / 공급량 / 출고량 / 기초재고)
 # =============================================================
+# [신제품 정책]
+#   NEWPROD_APPLY_FROM : 탭1~7에 '영업기획 계획'을 적용하기 시작하는 월.
+#                        이 월 이전은 기존(지점 수립) 계획 그대로 → 이미 보고된 정확도 불변.
+#   NEWPROD_MONTHS     : 출시(첫 영업기획 계획 수립월) 후 신제품으로 볼 개월 수.
+NEWPROD_APPLY_FROM = '2026-08'
+NEWPROD_MONTHS = 12
+NEWPROD_ORG = '영업기획'          # 신제품 계획의 가상 조직/거래처 명칭
+PLAN_SOURCE_NEWPROD = 'PLAN'      # 계획 저장소 소스 구분 (USMX / CAN / PLAN)
+
 NEWPROD_STORE = os.path.join(HIST_DIR, "newproduct.csv")
 NEWPROD_COLS = ['제품코드', '제품명', '기준월', '수요계획', '공급량', '출고량', '기초재고']
 # 엑셀 하위 헤더 → 내부 명칭
@@ -1278,23 +1357,101 @@ def process_newprod_upload(f, base_year):
     return out[NEWPROD_COLS].reset_index(drop=True), None
 
 
+@st.cache_data(show_spinner=False)
+def get_newprod_window(np_mtime):
+    """{제품코드: (시작월, 종료월)} — 시작월 = 영업기획 수요계획이 처음 잡힌 달,
+       종료월 = 시작월 + (NEWPROD_MONTHS-1)개월. 코드 미정(NEW-) 품목은 제외."""
+    d = load_simple_store(NEWPROD_STORE, NEWPROD_COLS,
+                          ['수요계획', '공급량', '출고량', '기초재고'])
+    if d.empty:
+        return {}
+    d = d[(d['수요계획'] > 0) & (~d['제품코드'].astype(str).str.startswith('NEW-'))]
+    if d.empty:
+        return {}
+    out = {}
+    for code, g in d.groupby('제품코드'):
+        ms = sorted([m for m in g['기준월'].astype(str) if re.fullmatch(r'\d{4}-\d{2}', m)])
+        if not ms:
+            continue
+        out[str(code)] = (ms[0], month_shift(ms[0], NEWPROD_MONTHS - 1))
+    return out
+
+
+def is_newprod_active(code, month, window):
+    """해당 월에 이 품목이 '신제품 정책 적용 대상'인지"""
+    w = window.get(str(code))
+    if not w:
+        return False
+    if not month or month < NEWPROD_APPLY_FROM:      # 적용 시작월 이전은 기존 방식 유지
+        return False
+    return w[0] <= month <= w[1]
+
+
+def newprod_plan_rows(np_mtime):
+    """신제품 영업기획 계획 → 계획 저장소 형식(거래처/조직은 가상값)"""
+    d = load_simple_store(NEWPROD_STORE, NEWPROD_COLS,
+                          ['수요계획', '공급량', '출고량', '기초재고'])
+    if d.empty:
+        return pd.DataFrame(columns=PLAN_COLS)
+    d = d[(d['수요계획'] > 0) & (~d['제품코드'].astype(str).str.startswith('NEW-'))]
+    if d.empty:
+        return pd.DataFrame(columns=PLAN_COLS)
+    out = pd.DataFrame({
+        '기준월': d['기준월'].astype(str),
+        '거래처 코드': NEWPROD_ORG,
+        '제품코드': d['제품코드'].astype(str),
+        '영업부명': NEWPROD_ORG,
+        '영업지점명': NEWPROD_ORG,
+        '영업사원명': NEWPROD_ORG,
+        '계획수량': d['수요계획'].astype(float),
+        '소스': PLAN_SOURCE_NEWPROD,
+    })
+    return out.groupby(['기준월'] + GROUP_COLS + ['소스'], as_index=False)['계획수량'].sum()[PLAN_COLS]
+
+
+def apply_newprod_plan(plan_df, np_mtime):
+    """같은 (월×제품)에 영업기획 계획이 있으면 지점 계획을 버리고 영업기획 계획만 사용.
+       적용은 NEWPROD_APPLY_FROM 이후 & 신제품 기간 내에서만."""
+    npr = newprod_plan_rows(np_mtime)
+    if npr.empty:
+        return plan_df
+    window = get_newprod_window(np_mtime)
+    keep = npr.apply(lambda r: is_newprod_active(r['제품코드'], r['기준월'], window), axis=1)
+    npr = npr[keep]
+    if npr.empty:
+        return plan_df
+    if plan_df is None or plan_df.empty:
+        return npr
+    # 대체 대상 (월×제품) 조합의 기존 계획 제거
+    key = set(zip(npr['기준월'], npr['제품코드']))
+    base = plan_df[~plan_df.apply(lambda r: (r['기준월'], r['제품코드']) in key, axis=1)]
+    return pd.concat([base, npr], ignore_index=True)
+
+
 # 🎯 [조절용] 거래처별 계획 검증 팝업 표 설정
 #    SHOW_CUSTOMER_CODE = False 로 두면 거래처 코드 컬럼을 숨겨 가로 폭을 아낀다.
 #    폭(px)은 아래 숫자만 바꾸면 즉시 반영된다.
 SHOW_CUSTOMER_CODE = False
 FUTC_COL_WIDTH = {
     '거래처 코드': 100,
-    '거래처명': 190,
+    '거래처명': 187,
     '영업지점명': 110,
     '영업사원명': 105,
-    '상태': 105,
-    '_값': 108,      # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 기준 / 가중 GAP 공통
-    '배수': 80,
+    '상태': 98,
+    '_값': 90,      # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 기준 / 가중 GAP 공통
+    '배수': 67,
 }
 
 # 🎯 팝업(dialog) 폭 확장 CSS — Streamlit 기본 'large'보다 넓게 (가로 스크롤 최소화)
 WIDE_DIALOG_CSS = """<style>
-div[data-testid="stDialog"] div[role="dialog"] { width: 95vw !important; max-width: 1750px !important; }
+div[data-testid="stDialog"] div[role="dialog"],
+div[data-testid="stModal"] div[role="dialog"],
+section[data-testid="stDialog"] div[role="dialog"],
+div[role="dialog"][aria-modal="true"] {
+  width: 96vw !important;
+  max-width: 1800px !important;
+}
+div[role="dialog"][aria-modal="true"] > div { max-width: 100% !important; }
 </style>"""
 
 # [거래처 그룹] 거래처명 앞 N개 단어가 같으면 같은 체인으로 묶음 (예: 'COSTCO WHOLESALE LA/NW' → 2)
@@ -2655,7 +2812,8 @@ def render_progress_tab():
     prog_und = _agg(undecided_status, '미확정')
     prog_next = _agg(next_status, '차월확정')
 
-    plan_store = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
+    plan_store = apply_newprod_plan(load_store(PLAN_STORE, PLAN_COLS, '계획수량'),
+                                    file_mtime(NEWPROD_STORE))   # 신제품은 영업기획 계획으로 대체
     plan_rows = apply_period_rules(plan_store[plan_store['기준월'] == month], 'plan')
     plan_rows = remap_org_current(plan_rows)     # 조직을 현재 마스터 기준으로 통일
     plan_m = plan_rows.groupby(GROUP_COLS, as_index=False)['계획수량'].sum()
@@ -2668,9 +2826,11 @@ def render_progress_tab():
     for _c in ['계획수량', '실적수량', '미확정', '차월확정']:
         if _c not in merged.columns:
             merged[_c] = 0.0
-    merged[['계획수량', '실적수량', '미확정', '차월확정']] = \
-        merged[['계획수량', '실적수량', '미확정', '차월확정']].fillna(0)
-    merged = merged.fillna({c: '' for c in GROUP_COLS})
+        # 숫자형으로 명시 변환 후 결측 채우기 (dtype 다운캐스팅 경고 방지)
+        merged[_c] = pd.to_numeric(merged[_c], errors='coerce').fillna(0.0)
+    for _c in GROUP_COLS:
+        if _c in merged.columns:
+            merged[_c] = merged[_c].astype(object).where(merged[_c].notna(), '')
 
     item_info, final_drop_codes = load_item_info_and_dropcodes(file_mtime(item_master_path), file_mtime(exclusion_path))
     merged = pd.merge(merged, item_info, on='제품코드', how='left')
@@ -2804,6 +2964,13 @@ def render_progress_tab():
     st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞).")
 
     org_cols = ['영업부명', '영업지점명', '영업사원명']
+    # 🎯 신제품은 조직 축 평가에서 제외 (계획 주체가 영업기획)
+    _npw = get_newprod_window(file_mtime(NEWPROD_STORE))
+    if _npw:
+        low_df = low_df[~low_df['제품코드'].apply(lambda c: is_newprod_active(c, month, _npw))]
+        if low_df.empty:
+            st.info("조건에 해당하는 품목이 없습니다. (신제품은 조직별 평가에서 제외)")
+            return
     detail = low_df.groupby(['제품코드', '제품명'] + org_cols, as_index=False)[['계획수량', '실적수량']].sum()
     detail['진척도'] = [compute_progress(p, a) for p, a in zip(detail['계획수량'], detail['실적수량'])]
     detail['GAP'] = detail['계획수량'] - detail['실적수량']
@@ -2886,6 +3053,59 @@ def render_progress_tab():
 
 
 
+# 🎯 [추가됨] 신제품 출고량을 시스템 실적으로 대체
+#    우선순위: ① 출고 마감 실적(actual_history) ② 당월 진척도의 '당월 출고 확정'분 ③ 엑셀 값
+def apply_system_actuals(npd):
+    if npd is None or npd.empty:
+        return npd
+    out = npd.copy()
+    out['출고량'] = pd.to_numeric(out['출고량'], errors='coerce').fillna(0.0)
+    out['_출처'] = '파일'
+
+    # ① 월 마감 실적
+    try:
+        act = apply_period_rules(load_store(ACT_STORE, ACT_COLS, '실적수량'), 'actual')
+    except Exception:
+        act = pd.DataFrame(columns=['기준월', '제품코드', '실적수량'])
+    if not act.empty:
+        a = act.groupby(['기준월', '제품코드'], as_index=False)['실적수량'].sum()
+        a['기준월'] = a['기준월'].astype(str)
+        a['제품코드'] = a['제품코드'].astype(str)
+        m = out[['기준월', '제품코드']].astype(str).merge(a, on=['기준월', '제품코드'], how='left')
+        hit = m['실적수량'].notna().values
+        out.loc[hit, '출고량'] = m.loc[hit, '실적수량'].values
+        out.loc[hit, '_출처'] = '출고실적'
+
+    # ② 아직 마감되지 않은 월은 진척도의 '당월 출고 확정'분으로 보완
+    try:
+        prog = apply_period_rules(load_store(PROG_STORE, PROG_COLS, '실적수량'), 'actual')
+    except Exception:
+        prog = pd.DataFrame(columns=['기준월', '제품코드', '마감여부', '실적수량'])
+    if not prog.empty:
+        rows = []
+        for mth, g in prog.groupby('기준월'):
+            try:
+                mnum = str(int(str(mth)[5:7]))
+            except Exception:
+                mnum = ''
+            sel = [s for s in g['마감여부'].unique()
+                   if '확정' in str(s) and '미확정' not in str(s) and (mnum and f"{mnum}월" in str(s))]
+            if not sel:
+                sel = [s for s in g['마감여부'].unique() if '확정' in str(s) and '미확정' not in str(s)]
+            if sel:
+                rows.append(g[g['마감여부'].isin(sel)])
+        if rows:
+            p = pd.concat(rows, ignore_index=True).groupby(
+                ['기준월', '제품코드'], as_index=False)['실적수량'].sum()
+            p['기준월'] = p['기준월'].astype(str)
+            p['제품코드'] = p['제품코드'].astype(str)
+            m2 = out[['기준월', '제품코드']].astype(str).merge(p, on=['기준월', '제품코드'], how='left')
+            fill = (out['_출처'] == '파일').values & m2['실적수량'].notna().values
+            out.loc[fill, '출고량'] = m2.loc[fill, '실적수량'].values
+            out.loc[fill, '_출처'] = '진척도(확정)'
+    return out
+
+
 # =============================================================
 # 🎯 [추가됨] 탭8: 신제품 계획 대비 현황
 # =============================================================
@@ -2901,8 +3121,28 @@ def render_newproduct_tab():
         st.markdown(f"<span style='color:#888888; font-size:0.78rem;'>데이터 갱신: {_upd}</span>",
                     unsafe_allow_html=True)
 
-    # 제품 선택 (코드 미정 품목은 '(코드 미정)' 표기)
-    prods = npd[['제품코드', '제품명']].drop_duplicates().sort_values('제품명')
+    # 🎯 출고량은 시스템 실적 우선 (출고 마감 실적 → 없으면 당월 진척도 확정분 → 없으면 엑셀 값)
+    npd = apply_system_actuals(npd)
+
+    # 🎯 제품명은 품목마스터 기준으로 통일 (업로드 파일의 SCM 편의 명칭 대신)
+    try:
+        _ii, _ = load_item_info_and_dropcodes(file_mtime(item_master_path), file_mtime(exclusion_path))
+        _nm = dict(zip(_ii['제품코드'].astype(str), _ii['제품명'].astype(str)))
+        npd['제품명'] = [_nm.get(str(c), n) for c, n in zip(npd['제품코드'], npd['제품명'])]
+    except Exception:
+        pass
+
+    # 🎯 정렬: ① 첫 수요계획 수립월 빠른 순 → ② 제품코드 순 → ③ 제품명(알파벳) 순
+    #    코드 미정(NEW-) 품목은 코드가 없는 것으로 보고 ③으로 정렬
+    _first = (npd[npd['수요계획'] > 0].groupby('제품코드')['기준월']
+              .min().to_dict()) if (npd['수요계획'] > 0).any() else {}
+    prods = npd[['제품코드', '제품명']].drop_duplicates().copy()
+    prods['_첫계획월'] = prods['제품코드'].map(_first).fillna('9999-99')
+    _nocode = prods['제품코드'].astype(str).str.startswith('NEW-')
+    prods['_코드없음'] = _nocode.astype(int)                    # 코드 있는 품목이 먼저
+    prods['_코드'] = np.where(_nocode, '', prods['제품코드'].astype(str))
+    prods['_이름'] = prods['제품명'].astype(str).str.upper()
+    prods = prods.sort_values(['_첫계획월', '_코드없음', '_코드', '_이름'])
     labels, key_map = [], {}
     for _, r in prods.iterrows():
         c = str(r['제품코드'])
@@ -2987,8 +3227,12 @@ def render_newproduct_tab():
     st.dataframe(tbl.style.format(fmt_np).apply(hl_np, axis=1),
                  width='content', hide_index=True,
                  height=37 * (len(tbl) + 1) + 12, column_config=cfg_np)
+    _src = d['_출처'].value_counts().to_dict() if '_출처' in d.columns else {}
+    _srctxt = ' / '.join(f"{k} {v}개월" for k, v in _src.items()) if _src else ''
     st.caption("💡 GAP = 수요계획 − 출고량 (양수 = 계획 대비 미달). 기초재고는 파일 값을 그대로 사용합니다. "
-               "네 항목이 모두 비어 있는 달(미출시 구간)은 표시하지 않습니다.")
+               "네 항목이 모두 비어 있는 달(미출시 구간)은 표시하지 않습니다. "
+               "출고량은 시스템 실적(출고 마감 → 진척도 확정분) 우선이며, 시스템에 없는 달만 파일 값을 씁니다."
+               + (f" [출처: {_srctxt}]" if _srctxt else ""))
 
 
 # =============================================================
@@ -3298,6 +3542,30 @@ if IS_ADMIN:
                     os.remove(p)
             st.rerun()
 
+# --- 제외 규칙 확인 (진단) ---
+with st.sidebar.expander("🔍 제외 규칙 확인"):
+    try:
+        _always, _from = load_exclusion_rules(file_mtime(exclusion_path))
+    except Exception as _e:
+        _always, _from = set(), {}
+        st.caption(f"제외 리스트를 읽지 못했습니다: {_e}")
+    st.caption(f"**전 기간 제외**: {len(_always)}건 (C열 비어 있음)")
+    _fm = dict(MONTHLY_EXCLUSIONS)
+    _fm.update(_from)
+    if _fm:
+        st.caption("**시작월부터 제외** (그 달 이전은 집계에 포함됨)")
+        st.dataframe(pd.DataFrame({'제품코드': list(_fm.keys()), '시작월': list(_fm.values())})
+                     .sort_values('시작월'), hide_index=True, height=min(220, 37 * (len(_fm) + 1) + 12))
+    else:
+        st.caption("시작월 지정 제외: 없음")
+    if ONGOING_CODE_MERGE:
+        st.caption("**시작월부터 코드 통합**")
+        st.dataframe(pd.DataFrame([{'원래코드': k, '통합코드': v[0], '시작월': v[1]}
+                                   for k, v in ONGOING_CODE_MERGE.items()]),
+                     hide_index=True, height=min(160, 37 * (len(ONGOING_CODE_MERGE) + 1) + 12))
+    st.caption("※ C열에 시작월을 넣으면 그 달부터만 제외됩니다. 이전에 '전 기간 제외'로 걸려 있던 코드에 "
+               "시작월을 넣으면, 시작월 이전 구간이 집계에 다시 포함되어 과거 정확도가 달라질 수 있습니다.")
+
 # --- 마스터 데이터 관리 ---
 st.sidebar.divider()
 if IS_ADMIN:
@@ -3337,7 +3605,8 @@ else:
 if master_ready and item_master_ready and exclusion_ready:
     raw_df = build_history_df(file_mtime(PLAN_STORE), file_mtime(ACT_STORE),
                               file_mtime(item_master_path), file_mtime(exclusion_path),
-                              PERIOD_RULES_KEY, file_mtime(master_path))
+                              period_rules_key(), file_mtime(master_path),
+                              file_mtime(NEWPROD_STORE))
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📊 1. 제품별 실적 뷰",
@@ -3400,10 +3669,27 @@ if master_ready and item_master_ready and exclusion_ready:
             st.markdown("##### 품목별 수요계획 대비 판매실적")
             create_styled_pivot(filtered_df, ['제품코드', '제품명', '국가'], selected_months)
 
+        # 🎯 신제품(영업기획 계획 적용 품목)은 조직 축 평가에서 제외
+        #    계획 주체(영업기획)와 실적 주체(지점·사원)가 달라 정확도가 왜곡되기 때문.
+        _np_win = get_newprod_window(file_mtime(NEWPROD_STORE))
+        def drop_newprod(d):
+            if not _np_win or d is None or d.empty:
+                return d
+            mask = d.apply(lambda r: is_newprod_active(r['제품코드'], r['기준월'], _np_win), axis=1)
+            return d[~mask]
+
+        org_df = drop_newprod(filtered_df)
+        _np_cnt = 0
+        if _np_win and not filtered_df.empty:
+            _np_cnt = filtered_df.apply(
+                lambda r: is_newprod_active(r['제품코드'], r['기준월'], _np_win), axis=1).sum()
+
         with tab2:
             st.markdown("##### 지점별 수요계획 대비 판매실적")
-            st.caption("💡 정확도 = 각 지점이 담당한 품목별 정확도의 평균 (GAP은 총 계획량 - 총 실적량 기준)")
-            create_styled_pivot(filtered_df, ['영업부명', '영업지점명'], selected_months, acc_mode='item_avg')
+            st.caption("💡 정확도 = 각 지점이 담당한 품목별 정확도의 평균 (GAP은 총 계획량 - 총 실적량 기준)"
+                       + (f" / ※ 신제품은 영업기획이 계획을 수립하므로 조직별 평가에서 제외됨"
+                          f" ({NEWPROD_APPLY_FROM}부터 적용, 탭8에서 확인)" if _np_cnt else ""))
+            create_styled_pivot(org_df, ['영업부명', '영업지점명'], selected_months, acc_mode='item_avg')
 
         with tab3:
             st.markdown("##### 영업부/지점/사원을 좁혀가며, 이슈를 딥다이브.")
@@ -3440,7 +3726,7 @@ if master_ready and item_master_ready and exclusion_ready:
                     min_value=0, max_value=100, value=100, step=5
                 )
 
-            summary_base = apply_product_filters(branch_df, kw_input, acc_threshold, selected_months)
+            summary_base = apply_product_filters(drop_newprod(branch_df), kw_input, acc_threshold, selected_months)
             t3_filtered = apply_product_filters(t3_df, kw_input, acc_threshold, selected_months)
 
             # 🎯 팝업(거래처별 내역)용: 월 슬라이더만 빼고 동일 조건을 적용한 전체 히스토리
@@ -3460,7 +3746,8 @@ if master_ready and item_master_ready and exclusion_ready:
             st.markdown("---")
             st.markdown("##### 👥 지점별 · 영업사원별 정확도/GAP 요약")
             st.caption("💡 지점 소계 정확도는 탭2(지점 품목별 정확도 평균)와 동일 기준. 품목 필터를 걸면 '그 품목들에 대해 어디가 이슈인지' 분석. 정렬: 최근 월 정확도 낮은 순. 하단 전체 평균 = 사원 행들의 평균. "
-                       "※ 영업부·지점·사원은 **현재 영업마스터 기준**으로 전 기간 통일 표시됩니다(담당 변경 시 과거 실적도 현 담당자 기준).")
+                       "※ 영업부·지점·사원은 **현재 영업마스터 기준**으로 전 기간 통일 표시됩니다(담당 변경 시 과거 실적도 현 담당자 기준). "
+                       + (f"신제품은 사원 평가에서 제외됩니다({NEWPROD_APPLY_FROM}부터)." if _np_cnt else ""))
             render_person_summary(summary_base, selected_months)
 
             st.markdown("---")
@@ -3487,6 +3774,7 @@ if master_ready and item_master_ready and exclusion_ready:
                 (~raw_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
                 (~raw_df['영업지점명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS))
             ]
+            imp_base = drop_newprod(imp_base)     # 신제품은 사원 평가에서 제외
             if EVAL_EXCLUDE_ORGS:
                 st.caption(f"※ 평가 제외 조직: {', '.join(EVAL_EXCLUDE_ORGS)}")
             render_improvement_tab(imp_base, available_months)
@@ -3501,8 +3789,9 @@ if master_ready and item_master_ready and exclusion_ready:
 
     with tab7:
         st.markdown("##### 미래 수요계획 정합성 검증 (과거 판매 대비)")
-        _plan_all = apply_period_rules(load_store(PLAN_STORE, PLAN_COLS, '계획수량'), 'plan',
-                                       monthly_merge=False)
+        _plan_all = apply_newprod_plan(load_store(PLAN_STORE, PLAN_COLS, '계획수량'),
+                                       file_mtime(NEWPROD_STORE))
+        _plan_all = apply_period_rules(_plan_all, 'plan', monthly_merge=False)
         try:
             _item_info, _drop = load_item_info_and_dropcodes(file_mtime(item_master_path),
                                                              file_mtime(exclusion_path))
