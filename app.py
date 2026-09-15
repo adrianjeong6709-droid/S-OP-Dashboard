@@ -92,12 +92,14 @@ PROG_COLS = ['기준월'] + GROUP_COLS + ['마감여부', '실적수량']
 # =============================================================
 GOAL_STORE = os.path.join(HIST_DIR, "sales_goal.csv")        # 연 1회 영업목표 (영구)
 BILL_STORE = os.path.join(HIST_DIR, "billing_done.csv")      # 빌링완료 스냅샷
-PRE_STORE = os.path.join(HIST_DIR, "preship_orders.csv")     # 빌링전 스냅샷
+PRE_STORE = os.path.join(HIST_DIR, "preship_orders.csv")
+IMP_STORE = os.path.join(HIST_DIR, "import_orders.csv")      # 🎯 수입 오더 (빌링전 구조 동일)     # 빌링전 스냅샷
 GOAL_META = os.path.join(HIST_DIR, "goal_meta.csv")          # 스냅샷 기준일자
 
 GOAL_COLS = ['영업부코드', '영업부명', '영업지점코드', '영업지점명', '기준월', '목표금액']
 BILL_COLS = ['기준월', '영업부코드', '영업지점코드', '박스', '금액']
 PRE_COLS = ['기준월', '영업부코드', '영업지점코드', '상태', '출고예정일', '인도조건', '박스', '금액']
+IMP_COLS = PRE_COLS                                            # 수입 오더도 동일 구조
 
 # 🎯 원본 파일의 컬럼 위치(엑셀 열 문자). 파일 양식이 바뀌면 여기만 수정하면 됩니다.
 BILLING_COL_MAP = {'영업부코드': 'AM', '영업지점코드': 'AO', '박스': 'O', '금액': 'S'}
@@ -105,6 +107,7 @@ PRESHIP_COL_MAP = {'문서구분': 'C', '상태': 'AA', '박스': 'V', '금액':
                    '출고예정일': 'AK', '인도조건': 'AH',
                    '영업부코드': 'L', '영업지점코드': 'N'}
 PRESHIP_DOCTYPE = 'YOCO'      # 빌링전 데이터에서 기본으로 선택하는 문서구분
+IMPORT_DOCTYPE = 'YOTB'       # 수입 오더 문서구분 (상태·출고예정일 조건 없이 전량 집계)
 
 # =============================================================
 # 🎯 [추가됨] 과거 판매 이력 (계획 검증 전용 · 정확도 계산에는 절대 사용하지 않음)
@@ -522,6 +525,42 @@ def process_progress_upload(prog_file, master_lookup, target_month):
     out = df.groupby(GROUP_COLS + ['마감여부'], as_index=False)['실적수량'].sum()
     out['기준월'] = target_month
     return out[PROG_COLS]
+
+
+# 🎯 [추가됨] 수입 오더: 빌링전과 같은 열 구조이나 문서구분이 YOTB이고,
+#    C3/C4 모두 확정 상태라 상태·출고예정일 조건 없이 전량을 집계한다.
+def process_import_upload(f, month, report=None):
+    """report: dict를 넘기면 진단 정보(C열 값 분포 등)를 담아준다"""
+    df = read_any(f)
+    idx = {k: col_letter_to_idx(v) for k, v in PRESHIP_COL_MAP.items()}
+    if df.shape[1] <= max(idx.values()):
+        if report is not None:
+            report['error'] = f"컬럼 수 부족 (파일 {df.shape[1]}열, 필요 {max(idx.values())+1}열)"
+        return None
+    doc = df.iloc[:, idx['문서구분']].astype(str).str.strip().str.upper()
+    if report is not None:
+        report['doc_counts'] = doc.value_counts().head(15).to_dict()
+        report['total_rows'] = int(len(df))
+    # 정확히 일치 → 없으면 부분 일치(예: 'YOTB - Import')로 재시도
+    m = (doc == IMPORT_DOCTYPE.upper())
+    if not m.any():
+        m = doc.str.contains(IMPORT_DOCTYPE.upper(), na=False)
+    df = df[m]
+    if df.empty:
+        return None
+    out = pd.DataFrame({
+        '영업부코드': norm_code(df.iloc[:, idx['영업부코드']]),
+        '영업지점코드': norm_code(df.iloc[:, idx['영업지점코드']]),
+        '상태': df.iloc[:, idx['상태']].astype(str).str.replace('\xa0', ' ', regex=False).str.strip().str.upper(),
+        '출고예정일': '',
+        '인도조건': df.iloc[:, idx['인도조건']].astype(str).str.replace('\xa0', ' ', regex=False).str.strip().str.upper(),
+        '박스': to_num(df.iloc[:, idx['박스']]),
+        '금액': to_num(df.iloc[:, idx['금액']]),
+    })
+    out = out.groupby(['영업부코드', '영업지점코드', '상태', '출고예정일', '인도조건'],
+                      as_index=False)[['박스', '금액']].sum()
+    out['기준월'] = month
+    return out[IMP_COLS]
 
 
 # =============================================================
@@ -976,7 +1015,7 @@ def build_goal_html(body, spec, week_specs, mm):
 
     # 굵은 세로선이 들어갈 컬럼(그 컬럼의 왼쪽 경계)
     first_week_key = week_specs[0][0] if week_specs else '월합계 박스'
-    thick_keys = {'Billing 박스', first_week_key, '배송대기 박스', '총합계 박스'}
+    thick_keys = {'Billing 박스', first_week_key, '배송대기 박스', '수입 박스', '총합계 박스'}
     gs = {i for i, (k, _, _) in enumerate(spec) if k in thick_keys}
     def th_cls(base, thick=False):
         return f'{base} gs' if thick else base
@@ -995,7 +1034,7 @@ def build_goal_html(body, spec, week_specs, mm):
         r1.append(f'<th class="{th_cls("h-g", wi == 0)}" colspan="2" rowspan="2">{lb}<br>출고 확정</th>')
     r1 += [f'<th class="{th_cls("h-g", not week_specs)}" colspan="3" rowspan="2">{mm}월 출고 확정<br>합계</th>',
            f'<th class="h-g" colspan="3" rowspan="2">{mm}월 총 합계<br>(Billing+출고 완료,확정)</th>',
-           f'<th class="h-e gs" colspan="4">{mm}월 출고 미확정</th>',
+           f'<th class="h-e gs" colspan="6">{mm}월 출고 미확정</th>',
            '<th class="h-b gs" colspan="2" rowspan="2">총 합계<br>(미확정 포함)</th>',
            '<th class="h-b" rowspan="3">차이</th>',
            '<th class="h-b" rowspan="3">%</th>', '</tr>']
@@ -1003,7 +1042,8 @@ def build_goal_html(body, spec, week_specs, mm):
 
     # 2행: 출고 미확정 하위 그룹
     h.append('<tr><th class="h-e gs" colspan="2">배송 대기</th>'
-             '<th class="h-e" colspan="2">픽업 대기</th></tr>')
+             '<th class="h-e" colspan="2">픽업 대기</th>'
+             '<th class="h-e gs" colspan="2">수입 오더</th></tr>')
 
     # 3행: 박스 / 금액 / %
     r3 = ['<tr>']
@@ -1038,10 +1078,12 @@ def render_goal_tab():
 
     bill = load_simple_store(BILL_STORE, BILL_COLS, ['박스', '금액'])
     pre = load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])
+    imp = load_simple_store(IMP_STORE, IMP_COLS, ['박스', '금액'])      # 🎯 수입 오더
     snap = load_meta('기준일자')
 
     months = sorted([m for m in goal['기준월'].unique() if isinstance(m, str) and m.strip()])
-    data_months = sorted({m for m in (set(bill['기준월']) | set(pre['기준월'])) if isinstance(m, str) and m.strip()})
+    data_months = sorted({m for m in (set(bill['기준월']) | set(pre['기준월']) | set(imp['기준월']))
+                          if isinstance(m, str) and m.strip()})
     if data_months:
         cands = [m for m in months if m in set(data_months)]
         default_idx = months.index(cands[-1]) if cands else len(months) - 1
@@ -1060,10 +1102,12 @@ def render_goal_tab():
     # 🎯 선택한 달의 데이터만 사용 (월별 히스토리에서 추출)
     bill = bill[bill['기준월'] == month].copy()
     pre = pre[pre['기준월'] == month].reset_index(drop=True).copy()
+    imp = imp[imp['기준월'] == month].reset_index(drop=True).copy()
     # 지점코드 통합 (예: E-Commerce Project A 545 → E-Commerce 543)
     if BRANCH_CODE_MERGE:
         bill['영업지점코드'] = bill['영업지점코드'].replace(BRANCH_CODE_MERGE)
         pre['영업지점코드'] = pre['영업지점코드'].replace(BRANCH_CODE_MERGE)
+        imp['영업지점코드'] = imp['영업지점코드'].replace(BRANCH_CODE_MERGE)
     if bill.empty and pre.empty:
         st.warning(f"⚠️ {month} 빌링 데이터가 없습니다. 좌측 🎯 영역에서 해당 월 자료를 등록해주세요.")
 
@@ -1079,7 +1123,7 @@ def render_goal_tab():
 
     # 목표에 없는 지점(예: NSA HQ)도 실적이 있으면 하단에 표시
     known = set(base['영업지점코드'])
-    extra_codes = set(bill['영업지점코드']) | set(pre['영업지점코드'])
+    extra_codes = set(bill['영업지점코드']) | set(pre['영업지점코드']) | set(imp['영업지점코드'])
     extra_codes = {c for c in extra_codes if c and c not in known and c != 'nan'}
     if extra_codes:
         ex = pd.DataFrame({'영업지점코드': sorted(extra_codes)})
@@ -1140,8 +1184,13 @@ def render_goal_tab():
     join('픽업대기 박스', '픽업대기 금액', agg_by_branch(pre, undecided & (pre['인도조건'] == DELIVERY_EXW)))
 
     # ⑦ 총 합계 / 차이 / 달성률
-    base['총합계 박스'] = base['확정합계 박스'] + base['배송대기 박스'] + base['픽업대기 박스']
-    base['총합계 금액'] = base['확정합계 금액'] + base['배송대기 금액'] + base['픽업대기 금액']
+    # 수입 오더 (YOTB 전량 · 미확정 성격)
+    join('수입 박스', '수입 금액', agg_by_branch(imp))
+
+    base['총합계 박스'] = (base['확정합계 박스'] + base['배송대기 박스']
+                        + base['픽업대기 박스'] + base['수입 박스'])
+    base['총합계 금액'] = (base['확정합계 금액'] + base['배송대기 금액']
+                        + base['픽업대기 금액'] + base['수입 금액'])
 
     def ratio(num, den):
         return np.where(den > 0, num / den.replace(0, np.nan), np.nan)
@@ -1157,6 +1206,7 @@ def render_goal_tab():
                   + week_cols + ['월합계 박스', '월합계 금액', '월합계 %',
                                  '확정합계 박스', '확정합계 금액', '확정합계 %',
                                  '배송대기 박스', '배송대기 금액', '픽업대기 박스', '픽업대기 금액',
+                                 '수입 박스', '수입 금액',
                                  '총합계 박스', '총합계 금액', '차이', '달성률'])
     base = base.rename(columns={'목표금액': '영업목표'})
 
@@ -1216,12 +1266,14 @@ def render_goal_tab():
                ('확정합계 박스', 'box', 'g'), ('확정합계 금액', 'money', 'g'), ('확정합계 %', 'pct', 'g2'),
                ('배송대기 박스', 'box', 'e'), ('배송대기 금액', 'money', 'e'),
                ('픽업대기 박스', 'box', 'e'), ('픽업대기 금액', 'money', 'e'),
+               ('수입 박스', 'box', 'e'), ('수입 금액', 'money', 'e'),
                ('총합계 박스', 'box', 'b'), ('총합계 금액', 'money', 'b'),
                ('차이', 'money', 'b'), ('달성률', 'pct', 'b')])
 
     st.markdown(build_goal_html(body, spec, week_specs, mm), unsafe_allow_html=True)
 
-    st.caption("💡 Billing % = Billing 금액 ÷ 영업목표 / Billing+출고 % = (Billing + 출고 완료) ÷ 영업목표 / "
+    st.caption("💡 수입 오더 = 별도 업로드한 수입 오더 물량(총 합계에 포함). "
+               "Billing % = Billing 금액 ÷ 영업목표 / Billing+출고 % = (Billing + 출고 완료) ÷ 영업목표 / "
                f"{mm}월 출고 확정 합계 = 주차별 확정의 합 / {mm}월 총 합계 = Billing + 출고 완료 + 출고 확정 / "
                "총 합계(미확정 포함) = 여기에 배송·픽업 대기를 더한 값 / 차이 = 총 합계 - 영업목표 / % = 총 합계 ÷ 영업목표. "
                "각 오더는 상태에 따라 한 곳에만 집계되어 중복이 없습니다.")
@@ -1434,12 +1486,12 @@ def apply_newprod_plan(plan_df, np_mtime):
 SHOW_CUSTOMER_CODE = False
 FUTC_COL_WIDTH = {
     '거래처 코드': 100,
-    '거래처명': 187,
+    '거래처명': 190,
     '영업지점명': 110,
     '영업사원명': 105,
-    '상태': 98,
-    '_값': 90,      # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 기준 / 가중 GAP 공통
-    '배수': 67,
+    '상태': 105,
+    '_값': 100,      # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 기준 / 가중 GAP 공통
+    '배수': 78,
 }
 
 # 🎯 팝업(dialog) 폭 확장 CSS — Streamlit 기본 'large'보다 넓게 (가로 스크롤 최소화)
@@ -3375,13 +3427,15 @@ if IS_ADMIN:
     st.sidebar.caption("※ 대상월 = 이 데이터가 담고 있는 월(YYYY-MM). 월별로 보관되며 같은 달 재업로드 시 그 달만 교체.")
     bill_file = st.sidebar.file_uploader("7. 빌링완료 데이터", type=['xlsx', 'csv'], key="up_bill")
     pre_file = st.sidebar.file_uploader("8. 빌링전 데이터 (마감 시 생략 가능)", type=['xlsx', 'csv'], key="up_pre")
+    imp_file = st.sidebar.file_uploader("8-1. 빌링전 수입 데이터 (마감 시 생략 가능)",
+                                        type=['xlsx', 'csv'], key="up_imp")
     close_month = st.sidebar.checkbox("🔒 월 마감 반영 (빌링전 데이터 비움)", key="goal_close")
 
-    st.sidebar.caption("진행 중인 달은 두 파일을 같은 시점 자료로 동시 업로드. "
-                       "이미 끝난 달은 빌링완료만 올리고 체크박스. ")
+    st.sidebar.caption("진행 중인 달은 빌링완료·빌링전(+수입)을 같은 시점 자료로 함께 업로드. "
+                       "이미 끝난 달은 빌링완료만 올리고 '🔒 월 마감 반영' 체크. ")
     if st.sidebar.button("✅ 선택한 대상월에 반영", key="billpre_btn"):
         tgt_m = parse_month(snap_month_in)
-        if bill_file is None and pre_file is None:
+        if bill_file is None and pre_file is None and imp_file is None:
             st.sidebar.warning("반영할 파일을 1개 이상 올려주세요.")
         elif not (isinstance(tgt_m, str) and re.fullmatch(r'\d{4}-\d{2}', tgt_m)):
             st.sidebar.error("대상월 형식이 올바르지 않습니다. 예: 2026-07")
@@ -3407,10 +3461,30 @@ if IS_ADMIN:
                     else:
                         upsert_month_store(p, tgt_m, PRE_STORE, PRE_COLS, ['박스', '금액'])
                         msgs.append("빌링전")
+                if ok and imp_file is not None:
+                    _rep = {}
+                    im_ = process_import_upload(imp_file, tgt_m, report=_rep)
+                    if im_ is None or im_.empty:
+                        ok = False
+                        st.sidebar.error(f"수입 데이터에서 '{IMPORT_DOCTYPE}' 데이터를 찾지 못했습니다.")
+                        if _rep.get('error'):
+                            st.sidebar.caption(_rep['error'])
+                        if _rep.get('doc_counts'):
+                            st.sidebar.caption(f"파일 {_rep.get('total_rows', 0):,}행의 C열(문서구분) 값:")
+                            st.sidebar.dataframe(
+                                pd.DataFrame({'문서구분': list(_rep['doc_counts'].keys()),
+                                              '건수': list(_rep['doc_counts'].values())}),
+                                hide_index=True, height=200)
+                            st.sidebar.caption("→ 위 값 중 수입 오더에 해당하는 것을 코드 상단 "
+                                               "IMPORT_DOCTYPE 에 지정해주세요.")
+                    else:
+                        upsert_month_store(im_, tgt_m, IMP_STORE, IMP_COLS, ['박스', '금액'])
+                        msgs.append("빌링전 수입")
                 if ok and close_month:
-                    _s = load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])
-                    save_store(_s[_s['기준월'] != tgt_m], PRE_STORE)
-                    msgs.append("빌링전 비움(마감)")
+                    for _p, _c in [(PRE_STORE, PRE_COLS), (IMP_STORE, IMP_COLS)]:
+                        _s = load_simple_store(_p, _c, ['박스', '금액'])
+                        save_store(_s[_s['기준월'] != tgt_m], _p)
+                    msgs.append("빌링전·수입 비움(마감)")
             except Exception as e:
                 ok = False
                 st.sidebar.error(f"파일 해석 실패: {e}")
@@ -3495,7 +3569,8 @@ if not _goal_store.empty:
     _gm = sorted([m for m in _goal_store['기준월'].unique() if isinstance(m, str) and m.strip()])
     st.sidebar.caption(f"영업목표: {_gm[0]} ~ {_gm[-1]}")
 _bill_months = sorted({m for m in (set(load_simple_store(BILL_STORE, BILL_COLS, ['박스', '금액'])['기준월'])
-                                   | set(load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])['기준월']))
+                                   | set(load_simple_store(PRE_STORE, PRE_COLS, ['박스', '금액'])['기준월'])
+                                   | set(load_simple_store(IMP_STORE, IMP_COLS, ['박스', '금액'])['기준월']))
                        if isinstance(m, str) and m.strip()})
 st.sidebar.caption(f"빌링 보유: {', '.join(_bill_months) if _bill_months else '없음'} (최근 기준일자 {load_meta('기준일자') or '없음'})")
 _hist_store = load_simple_store(SALES_HIST_STORE, SALES_HIST_COLS, ['박스', '금액'])
@@ -3524,7 +3599,8 @@ if IS_ADMIN:
                     save_store(_s[_s['기준월'] != del_month_sel], SALES_HIST_STORE)
                 elif del_target == '빌링(목표진척)':
                     for _p, _c, _n in [(BILL_STORE, BILL_COLS, ['박스', '금액']),
-                                       (PRE_STORE, PRE_COLS, ['박스', '금액'])]:
+                                       (PRE_STORE, PRE_COLS, ['박스', '금액']),
+                                       (IMP_STORE, IMP_COLS, ['박스', '금액'])]:
                         _s = load_simple_store(_p, _c, _n)
                         save_store(_s[_s['기준월'] != del_month_sel], _p)
                 else:
@@ -3537,7 +3613,7 @@ if IS_ADMIN:
             st.caption("저장된 월이 없습니다.")
         confirm_reset = st.checkbox("전체 초기화에 동의합니다 (복구 불가)", key="reset_ok")
         if st.button("🚨 히스토리 전체 초기화", key="reset_btn") and confirm_reset:
-            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META, SALES_HIST_STORE, NEWPROD_STORE]:
+            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META, SALES_HIST_STORE, NEWPROD_STORE, IMP_STORE]:
                 if os.path.exists(p):
                     os.remove(p)
             st.rerun()
