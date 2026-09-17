@@ -2761,32 +2761,83 @@ def render_improvement_tab(df, available_months):
 
 
 # 🎯 [추가됨] 미확정 오더 상세: 그 품목의 미확정 물량이 어느 거래처·영업사원에 있는지
-def render_undecided_detail(prog_m, undecided_status, next_status, month, code, pname, show_next=False):
+def render_undecided_detail(prog_m, undecided_status, next_status, month, code, pname,
+                            show_next=False, plan_m=None, conf_status=None):
+    """품목 팝업: 거래처·담당자별 계획 / 확정 오더 / 미확정 오더 / 합계를 한 자리에서"""
     st.markdown(WIDE_DIALOG_CSS, unsafe_allow_html=True)
-    st.markdown(f"##### ⏳ 미확정 오더 상세 — {code} {pname} ({month})")
-    st.caption("오더는 생성됐으나 출고 일정이 잡히지 않은 물량입니다. 아래 거래처·담당자를 대상으로 "
-               "출고 일정 확정을 독려하면 당월 진척도를 끌어올릴 수 있습니다.")
+    st.markdown(f"##### 🔎 오더 상세 — {code} {pname} ({month})")
+    st.caption("확정 오더는 출고 일정이 잡힌 물량, 미확정 오더는 오더만 생성되고 일정이 없는 물량입니다. "
+               "미확정이 큰 거래처·담당자를 대상으로 출고 일정 확정을 독려하면 진척도를 끌어올릴 수 있습니다.")
 
-    d = prog_m[(prog_m['제품코드'] == code) & (prog_m['마감여부'].isin(undecided_status))]
-    if d.empty:
-        st.info("이 품목에는 미확정 오더가 없습니다.")
+    keys = ['영업지점명', '영업사원명', '거래처 코드']
+    d = prog_m[prog_m['제품코드'] == code]
+
+    def agg(sts, col):
+        x = d[d['마감여부'].isin(sts)] if sts else d.iloc[0:0]
+        if x.empty:
+            return pd.DataFrame(columns=keys + [col])
+        return x.groupby(keys, as_index=False)['실적수량'].sum().rename(columns={'실적수량': col})
+
+    conf = agg(conf_status or [], '확정')
+    und = agg(undecided_status or [], '미확정')
+
+    # 계획 (신제품은 영업기획 단일 행이라 거래처 매칭이 안 될 수 있음)
+    if plan_m is not None and not plan_m.empty and '제품코드' in plan_m.columns:
+        pl = plan_m[plan_m['제품코드'] == code]
+        pl = (pl.groupby(keys, as_index=False)['계획수량'].sum().rename(columns={'계획수량': '계획'})
+              if not pl.empty else pd.DataFrame(columns=keys + ['계획']))
     else:
-        g = d.groupby(['영업지점명', '영업사원명', '거래처 코드'], as_index=False)['실적수량'].sum()
+        pl = pd.DataFrame(columns=keys + ['계획'])
+
+    g = pl
+    for part in (conf, und):
+        g = g.merge(part, on=keys, how='outer') if not g.empty or not part.empty else g
+    if g.empty:
+        st.info("이 품목에는 계획·오더 데이터가 없습니다.")
+    else:
+        for c in ['계획', '확정', '미확정']:
+            if c not in g.columns:
+                g[c] = 0.0
+            g[c] = pd.to_numeric(g[c], errors='coerce').fillna(0.0)
+        g['합계'] = g['확정'] + g['미확정']
+        for c in keys:
+            g[c] = g[c].fillna('')
         names = load_customer_names(file_mtime(master_path))
         g['거래처명'] = g['거래처 코드'].astype(str).map(names).fillna('(이름 없음)') if names else ''
-        g = g.rename(columns={'실적수량': '미확정 수량'}).sort_values('미확정 수량', ascending=False)
-        show = g[['거래처명', '영업지점명', '영업사원명', '미확정 수량']].reset_index(drop=True)
+        # 영업기획(신제품) 계획은 거래처가 없으므로 표에서 분리해 별도 표기
+        _virt = (g['영업지점명'].astype(str) == NEWPROD_ORG) | (g['거래처 코드'].astype(str) == NEWPROD_ORG)
+        plan_org = float(g.loc[_virt, '계획'].sum())
+        g = g[~_virt]
+        g = g[(g[['계획', '확정', '미확정']].abs().sum(axis=1) > 0)].sort_values('합계', ascending=False)
+
+        show = g[['거래처명', '영업지점명', '영업사원명', '계획', '확정', '미확정', '합계']].reset_index(drop=True)
         h = min(420, 37 * (len(show) + 1) + 12)
         try:
             _c = {'거래처명': st.column_config.Column(width=200),
                   '영업지점명': st.column_config.Column(width=100),
-                  '영업사원명': st.column_config.Column(width=95),
-                  '미확정 수량': st.column_config.Column(width=105)}
+                  '영업사원명': st.column_config.Column(width=95)}
+            for _n in ['계획', '확정', '미확정', '합계']:
+                _c[_n] = st.column_config.Column(width=100)
         except TypeError:
             _c = None
-        st.dataframe(show.style.format({'미확정 수량': lambda x: f"{int(round(x)):,}"}),
-                     width='content', hide_index=True, height=h, column_config=_c)
-        st.caption(f"합계 {int(g['미확정 수량'].sum()):,} 박스 / {len(g)}개 거래처")
+        _f = {c: (lambda x: '-' if pd.isna(x) or x == 0 else f"{int(round(x)):,}")
+              for c in ['계획', '확정', '미확정', '합계']}
+        st.dataframe(show.style.format(_f), width='content', hide_index=True, height=h, column_config=_c)
+
+        tp = float(g['계획'].sum()) + plan_org      # 거래처별 계획 + 영업기획(신제품) 계획
+        tc, tu = float(g['확정'].sum()), float(g['미확정'].sum())
+        tot = pd.DataFrame([{'거래처명': '합계', '영업지점명': '', '영업사원명': '',
+                             '계획': tp, '확정': tc, '미확정': tu, '합계': tc + tu}])
+        st.dataframe(tot.style.format(_f).apply(
+            lambda r: ['background-color: #e6e6e6; font-weight: bold; color: #000000'] * len(r), axis=1),
+            width='content', hide_index=True, column_config=_c)
+        _pr = compute_progress(tp, tc)
+        _pa = compute_progress(tp, tc + tu)
+        st.caption(f"거래처 {len(g)}개 / 확정 기준 진척도 "
+                   f"{'-' if pd.isna(_pr) else ('∞' if np.isinf(_pr) else f'{_pr*100:.1f}%')} → "
+                   f"미확정 포함 {'-' if pd.isna(_pa) else ('∞' if np.isinf(_pa) else f'{_pa*100:.1f}%')}"
+                   + (f"  ※ 신제품이라 계획({int(round(plan_org)):,})은 영업기획 단위로만 존재하며 "
+                      "거래처별로는 배분되지 않습니다." if plan_org > 0 else ""))
 
     if show_next and next_status:
         n = prog_m[(prog_m['제품코드'] == code) & (prog_m['마감여부'].isin(next_status))]
@@ -2794,8 +2845,7 @@ def render_undecided_detail(prog_m, undecided_status, next_status, month, code, 
         if n.empty:
             st.info("차월 이후로 확정된 오더가 없습니다.")
         else:
-            gn = n.groupby(['마감여부', '영업지점명', '영업사원명', '거래처 코드'],
-                           as_index=False)['실적수량'].sum()
+            gn = n.groupby(['마감여부'] + keys, as_index=False)['실적수량'].sum()
             names = load_customer_names(file_mtime(master_path))
             gn['거래처명'] = gn['거래처 코드'].astype(str).map(names).fillna('(이름 없음)') if names else ''
             gn = gn.rename(columns={'실적수량': '수량', '마감여부': '출고 예정'}).sort_values('수량', ascending=False)
@@ -2969,7 +3019,7 @@ def render_progress_tab():
     st.caption("💡 흰색=확정 기준(현재) / 회색=미확정(이 오더가 이달에 다 나갈 경우) / 남색=합계 시나리오"
                + (" / 베이지=차월 이후 확정(당월 집계 제외, 참고용)" if show_next else "")
                + ". 합계 진척도가 100%를 넘으면 초과 달성이므로 일부는 차월 이월을 검토하세요. "
-                 "🖱️ **품목 행을 클릭하면 그 품목의 미확정 오더가 거래처·영업사원별로 팝업 표시됩니다.**")
+                 "🖱️ **품목 행을 클릭하면 그 품목의 계획·확정·미확정 오더가 거래처·영업사원별로 팝업 표시됩니다.**")
 
     t_plan = prod['계획수량'].sum(); t_act = prod['실적수량'].sum()
     t_und = prod['미확정'].sum(); t_sum = t_act + t_und
@@ -2985,7 +3035,7 @@ def render_progress_tab():
         picked1 = list(ev1.selection.rows) if ev1 is not None else []
     except Exception:
         picked1 = []
-    with st.expander("⏳ 미확정 오더 상세 열기 (표 왼쪽 체크박스 대신 사용)", expanded=not sel_ok1):
+    with st.expander("🔎 오더 상세 열기 (표 왼쪽 체크박스 대신 사용)", expanded=not sel_ok1):
         opts1 = ['(선택 안 함)'] + [f"{i+1}. {r['제품코드']} {r['제품명']}"
                                  for i, r in prod_disp.iterrows()]
         pick1 = st.selectbox("품목 선택", opts1, index=0, key="prog_item_pick",
@@ -2997,18 +3047,20 @@ def render_progress_tab():
         _r = prod_disp.iloc[picked1[0]]
         _code, _pname = _r['제품코드'], _r['제품명']
         if dialog_claim('tab5_undecided', picked1) and hasattr(st, 'dialog'):
-            @st.dialog("미확정 오더 상세", width="large")
+            @st.dialog("오더 상세", width="large")
             def _show_und():
                 render_undecided_detail(prog_m, undecided_status, next_status, month,
-                                        _code, _pname, show_next)
+                                        _code, _pname, show_next,
+                                        plan_m=plan_rows, conf_status=sel_status)
                 if st.button("닫기", key="prog_dlg_close"):
                     dialog_release('tab5_undecided')
                     st.rerun()
             _show_und()
         elif not hasattr(st, 'dialog'):
-            with st.expander("⏳ 미확정 오더 상세", expanded=True):
+            with st.expander("🔎 오더 상세", expanded=True):
                 render_undecided_detail(prog_m, undecided_status, next_status, month,
-                                        _code, _pname, show_next)
+                                        _code, _pname, show_next,
+                                        plan_m=plan_rows, conf_status=sel_status)
 
     st.markdown("---")
     st.markdown("##### ② 진척도 하위 품목 상세 (제품 × 영업부 × 지점 × 사원)")
@@ -3020,19 +3072,24 @@ def render_progress_tab():
     if low_df.empty:
         st.info("조건에 해당하는 품목이 없습니다.")
         return
-    st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞).")
+    st.caption("💡 표 하단의 붉은색 행은 계획 없이 실적이 발생한 품목(진척도 ∞). "
+               "신제품은 계획이 영업기획 단위로만 존재하므로 거래처·사원별 계획/진척도/GAP은 '-'로 표시되고 "
+               "확정 오더(실적)만 나타납니다. (품목 전체 계획·진척도는 위 ① 표에서 확인)")
 
     org_cols = ['영업부명', '영업지점명', '영업사원명']
-    # 🎯 신제품은 조직 축 평가에서 제외 (계획 주체가 영업기획)
+    # 🎯 신제품은 계획 주체가 영업기획이라 거래처·사원 단위 계획이 없다.
+    #    → 품목 자체를 빼지 않고, '계획/정확도/GAP만 비우고' 실적(확정 오더)은 그대로 보여준다.
     _npw = get_newprod_window(file_mtime(NEWPROD_STORE))
-    if _npw:
-        low_df = low_df[~low_df['제품코드'].apply(lambda c: is_newprod_active(c, month, _npw))]
-        if low_df.empty:
-            st.info("조건에 해당하는 품목이 없습니다. (신제품은 조직별 평가에서 제외)")
-            return
+    _np_codes = {c for c in low_df['제품코드'].unique() if is_newprod_active(c, month, _npw)} if _npw else set()
+    low_df = low_df[low_df['영업지점명'].astype(str) != NEWPROD_ORG]   # 영업기획 가상 행은 상세에서 제외
     detail = low_df.groupby(['제품코드', '제품명'] + org_cols, as_index=False)[['계획수량', '실적수량']].sum()
+    detail = detail[(detail['계획수량'].abs() + detail['실적수량'].abs()) > 0]
     detail['진척도'] = [compute_progress(p, a) for p, a in zip(detail['계획수량'], detail['실적수량'])]
     detail['GAP'] = detail['계획수량'] - detail['실적수량']
+    if _np_codes:
+        _m = detail['제품코드'].isin(_np_codes)
+        detail.loc[_m, ['계획수량', 'GAP']] = np.nan     # 신제품: 거래처별 계획 없음
+        detail.loc[_m, '진척도'] = np.nan
 
     label_cols = ['제품코드', '제품명'] + org_cols
     rows, subtotal_pos, inf_pos = [], [], set()
@@ -3047,8 +3104,11 @@ def render_progress_tab():
             rows.append([r[c] for c in label_cols] + [r['계획수량'], r['실적수량'], r['진척도'], r['GAP']])
             if is_inf:
                 inf_pos.add(len(rows) - 1)
+        _isnp = srow['제품코드'] in _np_codes
         rows.append([srow['제품코드'], srow['제품명'], '📍 제품 소계', '', '']
-                    + [srow['계획수량'], srow['실적수량'], srow['진척도'], srow['GAP']])
+                    + [np.nan if _isnp else srow['계획수량'], srow['실적수량'],
+                       np.nan if _isnp else srow['진척도'],
+                       np.nan if _isnp else srow['GAP']])
         subtotal_pos.append(len(rows) - 1)
         if is_inf:
             inf_pos.add(len(rows) - 1)
@@ -3076,8 +3136,10 @@ def render_progress_tab():
     st.markdown("---")
     st.markdown("##### ③ 선택 품목 기준 지점 · 영업사원별 GAP (GAP 큰 순)")
     st.caption("💡 위 ②에서 지정한 조건에 걸린 품목들만 집계한 GAP. (양수 = 미달). "
-               "진척도가 무한대(∞, 계획 없이 실적 발생)인 제품은 GAP 왜곡 방지를 위해 집계에서 제외.")
+               "진척도가 무한대(∞, 계획 없이 실적 발생)인 제품과 신제품(계획이 영업기획 단위)은 집계에서 제외.")
     gap_df = merged[merged['제품코드'].isin(low_codes)]
+    if _np_codes:
+        gap_df = gap_df[~gap_df['제품코드'].isin(_np_codes)]   # 신제품은 거래처별 계획이 없어 GAP 산출 불가
     if gap_df.empty:
         return st.info("GAP 집계 대상 품목이 없습니다. (∞ 품목 제외 기준)")
     pg = gap_df.groupby(['영업지점명', '영업사원명'], as_index=False)[['계획수량', '실적수량']].sum()
