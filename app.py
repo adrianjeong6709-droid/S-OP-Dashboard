@@ -1486,13 +1486,15 @@ def apply_newprod_plan(plan_df, np_mtime):
 SHOW_CUSTOMER_CODE = False
 FUTC_COL_WIDTH = {
     '거래처 코드': 100,
-    '거래처명': 190,
+    '거래처명': 187,
     '영업지점명': 110,
     '영업사원명': 105,
-    '상태': 105,
-    '_값': 100,      # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 기준 / 가중 GAP 공통
-    '배수': 78,
+    '상태': 98,
+    '_값': 90,       # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 GAP 공통
+    '배수': 67,
 }
+# 팝업 표에서 숨길 컬럼 (가로 폭 절약). 계산에는 계속 사용되며 표시만 생략됨.
+FUTC_HIDE_COLS = ['가중 기준']
 
 # 🎯 팝업(dialog) 폭 확장 CSS — Streamlit 기본 'large'보다 넓게 (가로 스크롤 최소화)
 WIDE_DIALOG_CSS = """<style>
@@ -2026,6 +2028,9 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
     cdisp = pd.DataFrame(rows, columns=ccols)
     if not SHOW_CUSTOMER_CODE:
         cdisp = cdisp.drop(columns=['거래처 코드'])   # 가로 폭 절약 (설정으로 다시 켤 수 있음)
+    _hide = [c for c in FUTC_HIDE_COLS if c in cdisp.columns]
+    if _hide:
+        cdisp = cdisp.drop(columns=_hide)
 
     def hl2(row):
         if row.name in sub_pos:
@@ -2042,6 +2047,8 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
         for _c in ['영업지점명', '영업사원명', '상태']:
             cfg2[_c] = st.column_config.Column(width=FUTC_COL_WIDTH[_c])
         for _c in vcols:
+            if _c in FUTC_HIDE_COLS:
+                continue
             cfg2[_c] = st.column_config.Column(
                 width=FUTC_COL_WIDTH['배수'] if _c == '배수' else FUTC_COL_WIDTH['_값'])
     except TypeError:
