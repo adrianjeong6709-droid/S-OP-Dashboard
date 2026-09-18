@@ -1608,6 +1608,24 @@ def compute_reference(sales, target_month, kinds=('전년 동월', '3개월 평�
     return out
 
 
+def codes_excluded_at(month):
+    """해당 월 시점에 분석에서 제외되어야 하는 제품코드 집합
+       (전 기간 제외 + 시작월이 그 달 이하인 제외 규칙)"""
+    out = set()
+    try:
+        always, from_month = load_exclusion_rules(file_mtime(exclusion_path))
+        out |= set(always)
+    except Exception:
+        from_month = {}
+    merged = dict(MONTHLY_EXCLUSIONS)
+    merged.update(from_month or {})
+    if month:
+        for c, s in merged.items():
+            if str(month) >= str(s):
+                out.add(str(c))
+    return out - set(UDON_KEEP_CODES)
+
+
 def merge_codes_for_target(sales, target_month):
     """미래 계획 검증용: 대상월이 통합 시작월 이후이면, 과거 실적도 두 코드를 합산한다.
        (같은 제품을 코드만 바꾼 것이므로 과거 판매 이력도 통합해서 비교해야 함)"""
@@ -1633,6 +1651,13 @@ def build_future_table(plan_df, sales, target_month, keys=('제품코드',), anc
     """대상월 계획 + 비교 기준값 + 각 기준 대비 GAP + 가중 GAP"""
     keys = list(keys)
     sales = merge_codes_for_target(sales, target_month)   # 대상월 기준 코드 통합 반영
+    # 🎯 대상월 시점에 제외 대상인 품목은 계획·과거실적 양쪽에서 모두 제거
+    _ex = codes_excluded_at(target_month)
+    if _ex:
+        if sales is not None and not sales.empty:
+            sales = sales[~sales['제품코드'].astype(str).isin(_ex)]
+        if plan_df is not None and not plan_df.empty:
+            plan_df = plan_df[~plan_df['제품코드'].astype(str).isin(_ex)]
     p = plan_df[plan_df['기준월'] == target_month]
     p = p.groupby(keys, as_index=False)['계획수량'].sum() if not p.empty \
         else pd.DataFrame(columns=keys + ['계획수량'])
@@ -1680,12 +1705,22 @@ def _fmt_mult(x):
 
 def render_future_chart(plan_df, sales, months, anchor_month, chart_key):
     """월별 총량: 계획(Bar) + 전년 동월(회색 Bar) + 3/6/12개월 평균(선)"""
-    plan_m = plan_df[plan_df['기준월'].isin(months)].groupby('기준월')['계획수량'].sum().reindex(months).fillna(0)
+    _pm = []
+    for m in months:
+        _ex = codes_excluded_at(m)
+        d = plan_df[(plan_df['기준월'] == m)]
+        if _ex and not d.empty:
+            d = d[~d['제품코드'].astype(str).isin(_ex)]
+        _pm.append(float(d['계획수량'].sum()) if not d.empty else 0.0)
+    plan_m = pd.Series(_pm, index=months)
 
     ly, avg3, avg6, avg12 = [], [], [], []
     for m in months:
-        refs = compute_reference(merge_codes_for_target(sales, m), m,
-                                 anchor_month=anchor_month, keys=('제품코드',))
+        _ex = codes_excluded_at(m)
+        _s = merge_codes_for_target(sales, m)
+        if _ex and _s is not None and not _s.empty:
+            _s = _s[~_s['제품코드'].astype(str).isin(_ex)]
+        refs = compute_reference(_s, m, anchor_month=anchor_month, keys=('제품코드',))
         ly.append(float(refs.get('전년 동월', pd.DataFrame({'값': []}))['값'].sum()) if '전년 동월' in refs else 0.0)
         avg3.append(float(refs.get('3개월 평균', pd.DataFrame({'값': []}))['값'].sum()) if '3개월 평균' in refs else 0.0)
         avg6.append(float(refs.get('6개월 평균', pd.DataFrame({'값': []}))['값'].sum()) if '6개월 평균' in refs else 0.0)
@@ -1893,6 +1928,9 @@ def render_future_ref_chart(plan_df, sales, month_pick, anchor_month, code, cust
     """계획 / 전년 동월 / 3·6·12개월 평균 / 12개월 단월 최대 를 비교하는 막대 차트"""
     keys = ('제품코드', '거래처 코드') if cust else ('제품코드',)
     sales = merge_codes_for_target(sales, month_pick)     # 대상월 기준 코드 통합 반영
+    _ex = codes_excluded_at(month_pick)
+    if _ex and sales is not None and not sales.empty:
+        sales = sales[~sales['제품코드'].astype(str).isin(_ex)]
     t = build_future_table(plan_df, sales, month_pick, keys=keys, anchor_month=anchor_month)
     t = t[t['제품코드'] == code]
     if cust:
