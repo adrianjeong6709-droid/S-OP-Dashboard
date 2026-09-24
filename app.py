@@ -1299,6 +1299,119 @@ NEWPROD_MONTHS = 12
 NEWPROD_ORG = '영업기획'          # 신제품 계획의 가상 조직/거래처 명칭
 PLAN_SOURCE_NEWPROD = 'PLAN'      # 계획 저장소 소스 구분 (USMX / CAN / PLAN)
 
+# =============================================================
+# 🎯 [추가됨] 재고 (WMS 일자별 스냅샷)
+#   헤더에 설명이 붙어 있어(예: 'LA (Rancho+DC+...)') 이름 매칭이 불안정하므로
+#   열 위치로 직접 지정한다. 각 창고 블록은 4열(Begin Stock/Recv./Delv./Stock).
+#   LA(AA)는 그 앞 창고들의 합계이므로 C~Z(LA 내역)는 읽지 않는다.
+# =============================================================
+INV_STORE = os.path.join(HIST_DIR, "inventory.csv")
+INV_COLS = ['기준일자', '제품코드', '창고', '기초재고', '입고', '출고', '예상재고']
+INV_BLOCKS = {'LA': 'AA', 'Cranbury': 'AE', 'Chicago': 'AI', 'Texas': 'AM'}  # 각 블록 시작열
+INV_TRANSFER_COL = 'AQ'          # 창고 간 이동 중 수량 (단일 열)
+INV_TRANSFER = 'TRANSFER'
+INV_WAREHOUSES = list(INV_BLOCKS.keys())
+
+
+def idx_to_col_letter(i):
+    """0-based 인덱스 → 엑셀 열 문자 (0=A, 26=AA)"""
+    s, i = '', i + 1
+    while i > 0:
+        i, r = divmod(i - 1, 26)
+        s = chr(ord('A') + r) + s
+    return s
+
+
+def _inv_body(raw):
+    """3행부터 실제 데이터. 제품코드가 없거나 합계 행은 제외"""
+    body = raw.iloc[2:].reset_index(drop=True)
+    if body.empty:
+        return body
+    code = body.iloc[:, 0].astype(str).str.strip()
+    name = body.iloc[:, 1].astype(str).str.strip() if body.shape[1] > 1 else code
+    bad = code.isin(['', 'nan', 'None']) | code.str.contains('합계|total', case=False, na=False) \
+        | name.str.contains('합계|total|총계', case=False, na=False)
+    return body[~bad].reset_index(drop=True)
+
+
+def inventory_column_preview(f):
+    """재고 파일의 열 문자 / 1행(창고) / 2행(항목) / 전체 합계 — 열 위치 확인용"""
+    raw = pd.read_excel(f, header=None, dtype=object)
+    if raw.empty or len(raw) < 3:
+        return pd.DataFrame()
+    top, sub = raw.iloc[0].tolist(), raw.iloc[1].tolist()
+    body = _inv_body(raw)
+    rows = []
+    for i in range(raw.shape[1]):
+        t = '' if i >= len(top) or pd.isna(top[i]) else str(top[i])[:26]
+        s = '' if i >= len(sub) or pd.isna(sub[i]) else str(sub[i])[:14]
+        col = body.iloc[:, i]
+        # 숫자형 비율이 낮으면 라벨 열로 보고 합계를 내지 않음 (제품명 등)
+        numeric_ratio = pd.to_numeric(col, errors='coerce').notna().mean() if len(col) else 0
+        if numeric_ratio < 0.5:
+            v, note = 0, '(라벨/문자)'
+        else:
+            v, note = int(round(float(np.nansum(to_num(col))))), ''
+        rows.append({'열': idx_to_col_letter(i), '1행(창고)': t, '2행(항목)': s,
+                     '합계': v, '비고': note})
+    return pd.DataFrame(rows)
+
+
+def process_inventory_upload(f, snap_date):
+    """WMS 재고 엑셀 → (기준일자, 제품코드, 창고, 기초재고/입고/출고/예상재고) 롱포맷"""
+    raw = pd.read_excel(f, header=None, dtype=object)
+    if raw.empty or len(raw) < 3:
+        return None, "빈 파일이거나 형식이 다릅니다."
+
+    body = _inv_body(raw)                            # 1~2행 헤더 + 합계행 제외
+    ncol = raw.shape[1]
+    need = max([col_letter_to_idx(v) + 3 for v in INV_BLOCKS.values()]
+               + [col_letter_to_idx(INV_TRANSFER_COL)])
+    if ncol <= need:
+        return None, f"컬럼 수가 부족합니다 (파일 {ncol}열, 필요 {need + 1}열). 원본 양식을 확인해주세요."
+
+    recs = []
+    codes = clean_code(body.iloc[:, 0])
+    for wh, start in INV_BLOCKS.items():
+        i = col_letter_to_idx(start)
+        recs.append(pd.DataFrame({
+            '기준일자': snap_date, '제품코드': codes, '창고': wh,
+            '기초재고': to_num(body.iloc[:, i]),
+            '입고': to_num(body.iloc[:, i + 1]),
+            '출고': to_num(body.iloc[:, i + 2]),
+            '예상재고': to_num(body.iloc[:, i + 3]),
+        }))
+    ti = col_letter_to_idx(INV_TRANSFER_COL)
+    recs.append(pd.DataFrame({
+        '기준일자': snap_date, '제품코드': codes, '창고': INV_TRANSFER,
+        '기초재고': to_num(body.iloc[:, ti]), '입고': 0.0, '출고': 0.0, '예상재고': 0.0,
+    }))
+
+    out = pd.concat(recs, ignore_index=True)
+    out = out[out['제품코드'].astype(str).str.strip().ne('') & out['제품코드'].astype(str).ne('nan')]
+    out = out[out[['기초재고', '입고', '출고', '예상재고']].abs().sum(axis=1) > 0]
+    if out.empty:
+        return None, "인식된 재고 데이터가 없습니다."
+    out['제품코드'] = out['제품코드'].replace(PRODUCT_MAPPING)
+    out = out.groupby(['기준일자', '제품코드', '창고'], as_index=False)[
+        ['기초재고', '입고', '출고', '예상재고']].sum()
+    return out[INV_COLS], None
+
+
+@st.cache_data
+def load_item_class(item_mtime):
+    """제품코드 → '수입' / '자사제조' (품목마스터에 TRA.GOODS 표기가 있으면 수입)"""
+    try:
+        m = normalize_cols(pd.read_excel(item_master_path))
+    except Exception:
+        return {}
+    if '제품코드' not in m.columns:
+        return {}
+    code = clean_code(m['제품코드'])
+    tra = m.astype(str).apply(lambda x: x.str.contains('TRA.GOODS', case=False, na=False)).any(axis=1)
+    return dict(zip(code.astype(str), np.where(tra, '수입', '자사제조')))
+
+
 NEWPROD_STORE = os.path.join(HIST_DIR, "newproduct.csv")
 NEWPROD_COLS = ['제품코드', '제품명', '기준월', '수요계획', '공급량', '출고량', '기초재고']
 # 엑셀 하위 헤더 → 내부 명칭
@@ -1540,7 +1653,7 @@ def month_shift(m, n):
 
 
 @st.cache_data(show_spinner=False)
-def build_sales_base(hist_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
+def build_sales_base(hist_mtime, act_mtime, item_mtime, exc_mtime, rules_key, keep_trade=False):
     """과거 판매 이력('25.1~'26.3) + 기존 출고실적('26.4~) 을 이어붙인 통합 실적.
        계획 검증 전용이며 정확도 계산에는 쓰이지 않음."""
     hist = load_simple_store(SALES_HIST_STORE, SALES_HIST_COLS, ['박스', '금액'])
@@ -1572,6 +1685,13 @@ def build_sales_base(hist_mtime, act_mtime, item_mtime, exc_mtime, rules_key):
         _, drop_codes = load_item_info_and_dropcodes(file_mtime(item_master_path),
                                                      file_mtime(exclusion_path))
         drop_codes = set(drop_codes) - set(UDON_KEEP_CODES)
+        if keep_trade:
+            # 재고 탭 등: 수입품(TRA.GOODS)도 판매 기준이 필요하므로 전 기간 제외 목록만 적용
+            try:
+                always, _ = load_exclusion_rules(file_mtime(exclusion_path))
+                drop_codes = set(always) - set(UDON_KEEP_CODES)
+            except Exception:
+                drop_codes = set()
         base = base[~base['제품코드'].isin(drop_codes)]
     except Exception:
         pass
@@ -3395,6 +3515,245 @@ def render_newproduct_tab():
 
 
 # =============================================================
+# 🎯 [추가됨] 탭9: 재고 현황 (PSI)
+# =============================================================
+def render_inventory_tab(item_info, sel_countries):
+    inv = load_simple_store(INV_STORE, INV_COLS, ['기초재고', '입고', '출고', '예상재고'])
+    if inv.empty:
+        return st.info("좌측 📦 영역에서 WMS 재고 파일을 업로드해주세요.")
+
+    dates = sorted([d for d in inv['기준일자'].unique() if isinstance(d, str) and d.strip()])
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        pick_date = st.selectbox("📅 재고 기준일자", dates, index=len(dates) - 1, key="inv_pick_date")
+    with c2:
+        _u = load_meta('재고갱신')
+        st.caption(f"기초재고(Begin Stock) 기준 / 보유 {len(dates)}일치"
+                   + (f" / 갱신 {_u}" if _u else ""))
+
+    d = inv[inv['기준일자'] == pick_date].copy()
+    d['제품코드'] = d['제품코드'].replace(PRODUCT_MAPPING)
+    _raw_total = float(d['기초재고'].sum())          # 원본(WMS) 전량 합계
+
+    o1, o2 = st.columns([1, 1])
+    with o1:
+        hide_excluded = st.checkbox("제외 품목 숨기기", value=True, key="inv_hide_excl",
+                                    help="제외 품목 리스트·단종 규칙에 걸린 품목을 숨깁니다. "
+                                         "체크를 풀면 WMS 원본 전량이 표시되어 정합성 검증·SMI 협의에 쓸 수 있습니다.")
+    with o2:
+        apply_country = st.checkbox("국가 필터 적용", value=False, key="inv_apply_country",
+                                    help="상단 '국가 포함' 필터를 재고에도 적용합니다. "
+                                         "해제하면 품목마스터에 없는 코드까지 모두 표시됩니다.")
+
+    if hide_excluded:
+        _ex = codes_excluded_at(str(pick_date)[:7])
+        if _ex:
+            d = d[~d['제품코드'].astype(str).isin(_ex)]
+        try:
+            # 제외 품목 리스트의 '전 기간 제외'만 적용 (수입품 TRA.GOODS는 재고에서 계속 표시)
+            _always, _ = load_exclusion_rules(file_mtime(exclusion_path))
+            _drop = set(_always) - set(UDON_KEEP_CODES)
+            d = d[~d['제품코드'].astype(str).isin(_drop)]
+        except Exception:
+            pass
+
+    d = d.merge(item_info[['제품코드', '제품명', '국가']], on='제품코드', how='left')
+    d['제품명'] = d['제품명'].fillna('⚠️ 품목마스터 누락')
+    d['국가'] = d['국가'].fillna('미분류')
+    if apply_country and sel_countries:
+        d = d[d['국가'].isin(sel_countries)]
+    if d.empty:
+        return st.info("표시할 재고 데이터가 없습니다.")
+
+    _shown = float(d['기초재고'].sum())
+    if abs(_raw_total - _shown) > 0.5:
+        st.caption(f"ℹ️ WMS 원본 전량 {int(round(_raw_total)):,} 박스 중 "
+                   f"{int(round(_shown)):,} 박스 표시 "
+                   f"(차이 {int(round(_raw_total - _shown)):,} = 제외 품목"
+                   + (" · 국가 필터" if apply_country else "") + "). "
+                   "위 체크박스를 풀면 원본 전량을 볼 수 있습니다.")
+
+    cls = load_item_class(file_mtime(item_master_path))
+    d['구분'] = d['제품코드'].astype(str).map(cls).fillna('자사제조')
+
+    # 월평균 판매 (재고 소진 개월 수 계산용)
+    sales = build_sales_base(file_mtime(SALES_HIST_STORE), file_mtime(ACT_STORE),
+                             file_mtime(item_master_path), file_mtime(exclusion_path),
+                             period_rules_key(), keep_trade=True)   # 수입품 포함
+    avg_n = st.number_input("월평균 판매 산정 개월 수", min_value=1, max_value=12, value=3, step=1,
+                            key="inv_avg_n")
+    avg = pd.DataFrame(columns=['제품코드', '월평균판매'])
+    if not sales.empty:
+        have = sorted([m for m in sales['기준월'].unique() if isinstance(m, str) and m.strip()])
+        if have:
+            ms = [m for m in [month_shift(have[-1], -i) for i in range(int(avg_n))] if m]
+            s = sales[sales['기준월'].isin(ms)]
+            if not s.empty:
+                avg = (s.groupby('제품코드', as_index=False)['실적수량'].sum()
+                       .rename(columns={'실적수량': '월평균판매'}))
+                avg['월평균판매'] = avg['월평균판매'] / max(1, len(set(ms)))
+
+    # --- ① 자사제조 vs 수입 ---
+    st.markdown("---")
+    st.markdown(f"##### ① 구분별 재고 · 재고일수 ({pick_date})")
+    grp = d.groupby('구분', as_index=False)['기초재고'].sum()
+    sv = d[['제품코드', '구분']].drop_duplicates().merge(avg, on='제품코드', how='left')
+    sv['월평균판매'] = pd.to_numeric(sv['월평균판매'], errors='coerce').fillna(0.0)
+    sv = sv.groupby('구분', as_index=False)['월평균판매'].sum()
+    grp = grp.merge(sv, on='구분', how='left').fillna({'월평균판매': 0.0})
+    grp['재고일수'] = np.where(grp['월평균판매'] > 0,
+                            grp['기초재고'] / grp['월평균판매'].replace(0, np.nan) * 30, np.nan)
+
+    mc = st.columns(max(2, len(grp)))
+    for i, r in grp.reset_index(drop=True).iterrows():
+        with mc[i % len(mc)]:
+            st.metric(f"{r['구분']} 재고", f"{int(round(r['기초재고'])):,} 박스",
+                      f"{r['재고일수']:.0f}일분" if pd.notna(r['재고일수']) else "—")
+
+    if PLOTLY_OK and not grp.empty:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=grp['기초재고'], y=grp['구분'], orientation='h',
+                             marker_color=['#1E4D9A' if g == '자사제조' else '#E8833A'
+                                           for g in grp['구분']],
+                             text=[f"{int(round(v)):,}" for v in grp['기초재고']],
+                             textposition='outside',
+                             hovertemplate='%{y}: %{x:,.0f} 박스<extra></extra>'))
+        fig.update_layout(height=200, margin=dict(l=10, r=40, t=20, b=10), showlegend=False,
+                          xaxis=dict(title='박스', separatethousands=True, rangemode='tozero'))
+        st.plotly_chart(fig, width='stretch', key="inv_cls_chart")
+
+    wtot = d.groupby('창고', as_index=False)['기초재고'].sum().sort_values('기초재고', ascending=False)
+    st.caption("창고별: " + ' / '.join(f"{r['창고']} {int(round(r['기초재고'])):,}"
+                                     for _, r in wtot.iterrows())
+               + f"  →  전국 {int(round(d['기초재고'].sum())):,} 박스")
+
+    # --- ② 품목별 재고와 소진 개월 수 ---
+    st.markdown("---")
+    st.markdown("##### ② 품목별 재고 · 재고 소진 개월 수")
+    p = d.groupby(['구분', '제품코드', '제품명'], as_index=False)['기초재고'].sum()
+    wide = d.pivot_table(index='제품코드', columns='창고', values='기초재고',
+                         aggfunc='sum', fill_value=0).reset_index()
+    p = p.merge(wide, on='제품코드', how='left').merge(avg, on='제품코드', how='left')
+    p['월평균판매'] = pd.to_numeric(p['월평균판매'], errors='coerce').fillna(0.0)
+    p['소진개월'] = np.where(p['월평균판매'] > 0,
+                          p['기초재고'] / p['월평균판매'].replace(0, np.nan), np.nan)
+
+    f1, f2, f3 = st.columns([1.3, 1, 1])
+    with f1:
+        view = st.radio("보기", ['전체', '결품 위험 (1개월 미만)', '과잉 재고 (3개월 초과)'],
+                        horizontal=True, key="inv_view")
+    with f2:
+        cls_pick = st.multiselect("구분", sorted(d['구분'].unique()),
+                                  default=sorted(d['구분'].unique()), key="inv_cls")
+    with f3:
+        min_stock = st.number_input("소량 재고 숨김 (박스 미만)", min_value=0, max_value=1000000,
+                                    value=0, step=100, key="inv_min")
+    if cls_pick:
+        p = p[p['구분'].isin(cls_pick)]
+    if view.startswith('결품'):
+        p = p[p['소진개월'].notna() & (p['소진개월'] < 1)].sort_values(['구분', '소진개월'])
+    elif view.startswith('과잉'):
+        p = p[p['소진개월'].notna() & (p['소진개월'] > 3)].sort_values(
+            ['구분', '소진개월'], ascending=[True, False])
+    else:
+        p = p.sort_values(['구분', '기초재고'], ascending=[True, False])
+    p = p[p['기초재고'] >= min_stock]
+    if p.empty:
+        return st.info("조건에 해당하는 품목이 없습니다.")
+
+    # 항상 모든 창고 컬럼을 보여준다 (값이 0이어도 자리 유지)
+    whs = INV_WAREHOUSES + [INV_TRANSFER]
+    for w in whs:
+        if w not in p.columns:
+            p[w] = 0.0
+    val_cols = whs + ['기초재고', '월평균판매']
+
+    # 🎯 구분별(자사제조 → 수입) 정렬 + 소계 + 총 합계
+    def _sub(block, label):
+        s = {c: float(block[c].sum()) for c in val_cols}
+        s['소진개월'] = (s['기초재고'] / s['월평균판매']) if s['월평균판매'] > 0 else np.nan
+        s.update({'구분': label, '제품코드': '', '제품명': ''})
+        return s
+
+    order = [c for c in ['자사제조', '수입'] if c in set(p['구분'])]
+    order += [c for c in sorted(set(p['구분'])) if c not in order]
+    rows_i, sub_pos = [], []
+    for g in order:
+        blk = p[p['구분'] == g]
+        if blk.empty:
+            continue
+        for _, r in blk.iterrows():
+            rows_i.append({**{k: r[k] for k in ['구분', '제품코드', '제품명']},
+                           **{c: r[c] for c in val_cols}, '소진개월': r['소진개월']})
+        rows_i.append(_sub(blk, f"📍 {g} 소계"))
+        sub_pos.append(len(rows_i) - 1)
+    if len(order) > 1:
+        rows_i.append(_sub(p, "📍 총 합계"))
+        sub_pos.append(len(rows_i) - 1)
+
+    disp = pd.DataFrame(rows_i)[['구분', '제품코드', '제품명'] + val_cols + ['소진개월']] \
+        .rename(columns={'기초재고': '전국재고'}).reset_index(drop=True)
+
+    fmt = {c: (lambda x: '-' if pd.isna(x) or x == 0 else f"{int(round(x)):,}")
+           for c in ['전국재고', '월평균판매'] + whs}
+    fmt['소진개월'] = lambda x: '-' if pd.isna(x) else f"{x:.1f}개월"
+
+    def hl(row):
+        if row.name in sub_pos:
+            return ['background-color: #dce6f5; font-weight: bold; color: #000000'] * len(row)
+        v = row['소진개월']
+        if pd.isna(v):
+            return [''] * len(row)
+        if v < 1:
+            return ['background-color: #fbe9e9'] * len(row)
+        if v > 3:
+            return ['background-color: #e8f0fb'] * len(row)
+        return [''] * len(row)
+
+    try:
+        cfg = {'구분': st.column_config.Column(width=85),
+               '제품코드': st.column_config.Column(width=95),
+               '제품명': st.column_config.Column(width=240)}
+        for c in whs + ['전국재고', '월평균판매', '소진개월']:
+            cfg[c] = st.column_config.Column(width=95)
+    except TypeError:
+        cfg = None
+
+    h = min(560, 37 * (len(disp) + 1) + 12)
+    st.dataframe(disp.style.format(fmt).apply(hl, axis=1),
+                 width='content', hide_index=True, height=h, column_config=cfg)
+    st.caption(f"💡 소진 개월 수 = 전국재고 ÷ 최근 {int(avg_n)}개월 평균 판매. "
+               "🔴 1개월 미만은 결품 위험, 🔵 3개월 초과는 과잉 재고. 판매 이력이 없으면 '-'. "
+               "LA는 Rancho·DC·Jersey·DC2·DC3·Rancho_plant2의 합계이며, TRANSFER는 창고 간 이동 중 물량입니다.")
+
+    # --- ③ 재고 추이 ---
+    if len(dates) >= 2:
+        st.markdown("---")
+        st.markdown("##### ③ 전국 재고 추이")
+        tr = inv.copy()
+        tr['제품코드'] = tr['제품코드'].replace(PRODUCT_MAPPING)
+        codes = ['(전체)'] + [f"{r['제품코드']} {r['제품명']}" for _, r in disp.iterrows()][:200]
+        pick_code = st.selectbox("품목 선택", codes, index=0, key="inv_trend_code")
+        if pick_code != '(전체)':
+            tr = tr[tr['제품코드'] == pick_code.split(' ')[0]]
+        g = tr.groupby('기준일자', as_index=False)['기초재고'].sum().sort_values('기준일자')
+        if PLOTLY_OK and not g.empty:
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(x=g['기준일자'], y=g['기초재고'], name='재고',
+                                      mode='lines+markers',
+                                      line=dict(shape='spline', smoothing=1.3, width=3, color='#1E4D9A'),
+                                      marker=dict(size=10, color='#BBD6F2',
+                                                  line=dict(width=2.5, color='#1E4D9A')),
+                                      hovertemplate='%{x}<br>재고: %{y:,.0f}<extra></extra>'))
+            fig2.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), showlegend=False,
+                               yaxis=dict(title='박스', separatethousands=True, rangemode='tozero'),
+                               hovermode='x unified')
+            st.plotly_chart(fig2, width='stretch', key=f"inv_trend_{pick_code}")
+        else:
+            st.line_chart(g.set_index('기준일자')['기초재고'])
+
+
+# =============================================================
 # 사이드바: 월별 히스토리 등록 (롤링 업서트)
 # =============================================================
 # 열람 비밀번호 게이트: 인증 성공 시 세션에 기록해 입력칸을 화면에서 제거.
@@ -3654,6 +4013,45 @@ if IS_ADMIN:
                                f"{parsed_np['기준월'].nunique()}개월)")
             st.rerun()
 
+# --- 재고 데이터 ---
+if IS_ADMIN:
+    st.sidebar.divider()
+    st.sidebar.header("📦 재고 (WMS 일자별)")
+    st.sidebar.caption("WMS 원본 엑셀 그대로 업로드. LA 내역 창고(Rancho·DC 등)는 중복이라 자동 제외하고 "
+                       "LA·Cranbury·Chicago·Texas·TRANSFER만 집계합니다. 같은 날짜는 교체되고 "
+                       "다른 날짜는 쌓여 추이를 볼 수 있습니다.")
+    inv_date = st.sidebar.date_input("재고 기준일자", value=pd.Timestamp.today().date(), key="inv_date")
+    inv_file = st.sidebar.file_uploader("11. 재고 현황 (WMS)", type=['xlsx', 'csv'], key="up_inv")
+    if inv_file is not None:
+        with st.sidebar.expander("🔎 재고 파일 열 위치 확인"):
+            st.caption(f"현재 설정 — " + ', '.join(f"{k}={v}" for k, v in INV_BLOCKS.items())
+                       + f", TRANSFER={INV_TRANSFER_COL}")
+            try:
+                _pv = inventory_column_preview(inv_file)
+                _pv = _pv[(_pv['합계'] != 0) | (_pv['1행(창고)'] != '')]
+                st.dataframe(_pv, hide_index=True, height=300)
+                st.caption("전체 행 기준 합계입니다(합계 행 제외). 위 '열' 문자를 보고 코드 상단 "
+                           "INV_BLOCKS / INV_TRANSFER_COL 을 맞춰주세요.")
+            except Exception as e:
+                st.warning(f"미리보기 실패: {e}")
+    if inv_file is not None and st.sidebar.button("✅ 재고 반영", key="inv_btn"):
+        try:
+            parsed_inv, err_inv = process_inventory_upload(inv_file, str(inv_date))
+        except Exception as e:
+            parsed_inv, err_inv = None, str(e)
+        if parsed_inv is None or parsed_inv.empty:
+            st.sidebar.error(f"재고 반영 실패: {err_inv or '인식된 데이터가 없습니다.'}")
+        else:
+            _s = load_simple_store(INV_STORE, INV_COLS, ['기초재고', '입고', '출고', '예상재고'])
+            _keep = _s[_s['기준일자'] != str(inv_date)] if not _s.empty else _s
+            save_store(pd.concat([_keep, parsed_inv[INV_COLS]], ignore_index=True), INV_STORE)
+            save_meta('재고갱신', pd.Timestamp.now().strftime('%Y-%m-%d %H:%M'))
+            _wsum = parsed_inv.groupby('창고')['기초재고'].sum()
+            st.sidebar.success(f"재고 반영 완료 ({inv_date} / {parsed_inv['제품코드'].nunique()}개 품목)")
+            st.sidebar.caption("창고별 기초재고: " +
+                               ' / '.join(f"{k} {int(round(v)):,}" for k, v in _wsum.items()))
+            st.rerun()
+
 # --- 저장 현황 및 관리 ---
 st.sidebar.divider()
 st.sidebar.header("🗂️ 저장 데이터 현황" + ("/관리" if IS_ADMIN else ""))
@@ -3692,16 +4090,29 @@ if not _np_store.empty:
     st.sidebar.caption(f"신제품: {_np_store['제품코드'].nunique()}개 품목 (갱신 {load_meta('신제품갱신') or '-'})")
 else:
     st.sidebar.caption("신제품: 없음")
+_inv_store = load_simple_store(INV_STORE, INV_COLS, ['기초재고', '입고', '출고', '예상재고'])
+_inv_dates = sorted([d for d in _inv_store['기준일자'].unique()
+                     if isinstance(d, str) and d.strip()]) if not _inv_store.empty else []
+if _inv_dates:
+    st.sidebar.caption(f"재고: {_inv_dates[0]} ~ {_inv_dates[-1]} ({len(_inv_dates)}일치)")
+else:
+    st.sidebar.caption("재고: 없음")
 
 if IS_ADMIN:
     with st.sidebar.expander("🧹 특정 월 삭제 / 전체 초기화"):
-        del_target = st.selectbox("대상 저장소", ["계획", "실적", "진척도", "빌링(목표진척)", "과거 판매 이력"], key="del_store")
+        del_target = st.selectbox("대상 저장소",
+                                  ["계획", "실적", "진척도", "빌링(목표진척)", "과거 판매 이력", "재고"],
+                                  key="del_store")
         _opts = {'계획': plan_months, '실적': act_months, '진척도': prog_months,
-                 '빌링(목표진척)': _bill_months, '과거 판매 이력': _hist_months}[del_target]
+                 '빌링(목표진척)': _bill_months, '과거 판매 이력': _hist_months,
+                 '재고': _inv_dates}[del_target]
         if _opts:
             del_month_sel = st.selectbox("삭제할 월", _opts, key="del_month")
             if st.button("해당 월 삭제", key="del_btn"):
-                if del_target == '과거 판매 이력':
+                if del_target == '재고':
+                    _s = load_simple_store(INV_STORE, INV_COLS, ['기초재고', '입고', '출고', '예상재고'])
+                    save_store(_s[_s['기준일자'] != del_month_sel], INV_STORE)
+                elif del_target == '과거 판매 이력':
                     _s = load_simple_store(SALES_HIST_STORE, SALES_HIST_COLS, ['박스', '금액'])
                     save_store(_s[_s['기준월'] != del_month_sel], SALES_HIST_STORE)
                 elif del_target == '빌링(목표진척)':
@@ -3720,7 +4131,7 @@ if IS_ADMIN:
             st.caption("저장된 월이 없습니다.")
         confirm_reset = st.checkbox("전체 초기화에 동의합니다 (복구 불가)", key="reset_ok")
         if st.button("🚨 히스토리 전체 초기화", key="reset_btn") and confirm_reset:
-            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META, SALES_HIST_STORE, NEWPROD_STORE, IMP_STORE]:
+            for p in [PLAN_STORE, ACT_STORE, PROG_STORE, BILL_STORE, PRE_STORE, GOAL_META, SALES_HIST_STORE, NEWPROD_STORE, IMP_STORE, INV_STORE]:
                 if os.path.exists(p):
                     os.remove(p)
             st.rerun()
@@ -3791,7 +4202,7 @@ if master_ready and item_master_ready and exclusion_ready:
                               period_rules_key(), file_mtime(master_path),
                               file_mtime(NEWPROD_STORE))
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "📊 1. 제품별 실적 뷰",
         "🏢 2. 영업조직별 실적 뷰",
         "🛠️ 3. 상세 분석 (조직/사원별 딥다이브)",
@@ -3799,7 +4210,8 @@ if master_ready and item_master_ready and exclusion_ready:
         "⏱️ 5. 당월 진척도",
         "💰 6. 월 목표 대비 진척현황",
         "🔮 7. 미래 계획 검증",
-        "🆕 8. 신제품 현황"
+        "🆕 8. 신제품 현황",
+        "📦 9. 재고 현황"
     ])
 
     sel_countries = None
@@ -3992,6 +4404,19 @@ if master_ready and item_master_ready and exclusion_ready:
     with tab8:
         st.markdown("##### 신제품 계획 대비 현황 (수요계획 · 공급 · 출고 · 재고)")
         render_newproduct_tab()
+
+    with tab9:
+        st.markdown("##### 재고 현황 (창고별 · 품목별 · 소진 개월 수)")
+        try:
+            _ii2, _ = load_item_info_and_dropcodes(file_mtime(item_master_path),
+                                                   file_mtime(exclusion_path))
+        except Exception:
+            _ii2 = pd.DataFrame(columns=['제품코드', '제품명', '국가'])
+        try:
+            _c2 = list(sel_countries)
+        except NameError:
+            _c2 = sorted(_ii2['국가'].dropna().unique())
+        render_inventory_tab(_ii2, _c2)
 
 else:
     st.info("하단 ⚙️ 마스터 데이터 3종을 먼저 등록. 등록 후 좌측 📚 영역에서 계획/실적을 히스토리에 반영하면, 재업로드 없이 대시보드 표시됨")
