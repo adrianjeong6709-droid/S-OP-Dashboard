@@ -3545,17 +3545,17 @@ def render_inventory_tab(item_info, sel_countries):
                                     help="상단 '국가 포함' 필터를 재고에도 적용합니다. "
                                          "해제하면 품목마스터에 없는 코드까지 모두 표시됩니다.")
 
+    _ex_codes = set()
     if hide_excluded:
-        _ex = codes_excluded_at(str(pick_date)[:7])
-        if _ex:
-            d = d[~d['제품코드'].astype(str).isin(_ex)]
+        _ex_codes |= codes_excluded_at(str(pick_date)[:7])
         try:
             # 제외 품목 리스트의 '전 기간 제외'만 적용 (수입품 TRA.GOODS는 재고에서 계속 표시)
             _always, _ = load_exclusion_rules(file_mtime(exclusion_path))
-            _drop = set(_always) - set(UDON_KEEP_CODES)
-            d = d[~d['제품코드'].astype(str).isin(_drop)]
+            _ex_codes |= (set(_always) - set(UDON_KEEP_CODES))
         except Exception:
             pass
+        if _ex_codes:
+            d = d[~d['제품코드'].astype(str).isin(_ex_codes)]
 
     d = d.merge(item_info[['제품코드', '제품명', '국가']], on='제품코드', how='left')
     d['제품명'] = d['제품명'].fillna('⚠️ 품목마스터 누락')
@@ -3604,18 +3604,41 @@ def render_inventory_tab(item_info, sel_countries):
     grp['재고일수'] = np.where(grp['월평균판매'] > 0,
                             grp['기초재고'] / grp['월평균판매'].replace(0, np.nan) * 30, np.nan)
 
+    # 자사제조를 좌측에, 수입을 우측에
+    _ord = [g for g in ['자사제조', '수입'] if g in set(grp['구분'])]
+    _ord += [g for g in grp['구분'] if g not in _ord]
+    grp['_o'] = grp['구분'].map({g: i for i, g in enumerate(_ord)})
+    grp = grp.sort_values('_o').drop(columns=['_o']).reset_index(drop=True)
+
+    # 전일(직전 보유일자) 대비 증감
+    _pi = dates.index(pick_date)
+    prev_grp = {}
+    if _pi > 0:
+        _pv = inv[inv['기준일자'] == dates[_pi - 1]].copy()
+        _pv['제품코드'] = _pv['제품코드'].replace(PRODUCT_MAPPING)
+        if hide_excluded and _ex_codes:
+            _pv = _pv[~_pv['제품코드'].astype(str).isin(_ex_codes)]
+        _pv['구분'] = _pv['제품코드'].astype(str).map(cls).fillna('자사제조')
+        prev_grp = _pv.groupby('구분')['기초재고'].sum().to_dict()
+
     mc = st.columns(max(2, len(grp)))
-    for i, r in grp.reset_index(drop=True).iterrows():
+    for i, r in grp.iterrows():
         with mc[i % len(mc)]:
+            _prev = prev_grp.get(r['구분'])
+            _delta = (float(r['기초재고']) - float(_prev)) if _prev is not None else None
             st.metric(f"{r['구분']} 재고", f"{int(round(r['기초재고'])):,} 박스",
-                      f"{r['재고일수']:.0f}일분" if pd.notna(r['재고일수']) else "—")
+                      delta=(f"{int(round(_delta)):+,} 박스" if _delta not in (None, 0) else None))
+            _days = f"{r['재고일수']:.0f}일치" if pd.notna(r['재고일수']) else "판매 이력 없음"
+            st.markdown(f"<div style='font-size:1.15rem; font-weight:700; color:#1E4D9A; "
+                        f"margin-top:-6px;'>재고 {_days}</div>", unsafe_allow_html=True)
 
     if PLOTLY_OK and not grp.empty:
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=grp['기초재고'], y=grp['구분'], orientation='h',
+        _g = grp.iloc[::-1]          # 가로막대는 아래→위 순서라 뒤집어 자사제조가 위로
+        fig.add_trace(go.Bar(x=_g['기초재고'], y=_g['구분'], orientation='h',
                              marker_color=['#1E4D9A' if g == '자사제조' else '#E8833A'
-                                           for g in grp['구분']],
-                             text=[f"{int(round(v)):,}" for v in grp['기초재고']],
+                                           for g in _g['구분']],
+                             text=[f"{int(round(v)):,}" for v in _g['기초재고']],
                              textposition='outside',
                              hovertemplate='%{y}: %{x:,.0f} 박스<extra></extra>'))
         fig.update_layout(height=200, margin=dict(l=10, r=40, t=20, b=10), showlegend=False,
@@ -3720,11 +3743,145 @@ def render_inventory_tab(item_info, sel_countries):
         cfg = None
 
     h = min(560, 37 * (len(disp) + 1) + 12)
-    st.dataframe(disp.style.format(fmt).apply(hl, axis=1),
-                 width='content', hide_index=True, height=h, column_config=cfg)
+    _ev = None
+    try:
+        _ev = st.dataframe(disp.style.format(fmt).apply(hl, axis=1),
+                           width='content', hide_index=True, height=h, column_config=cfg,
+                           on_select="rerun", selection_mode="single-row", key="inv_item_table")
+    except TypeError:
+        st.dataframe(disp.style.format(fmt).apply(hl, axis=1),
+                     width='content', hide_index=True, height=h, column_config=cfg)
     st.caption(f"💡 소진 개월 수 = 전국재고 ÷ 최근 {int(avg_n)}개월 평균 판매. "
                "🔴 1개월 미만은 결품 위험, 🔵 3개월 초과는 과잉 재고. 판매 이력이 없으면 '-'. "
-               "LA는 Rancho·DC·Jersey·DC2·DC3·Rancho_plant2의 합계이며, TRANSFER는 창고 간 이동 중 물량입니다.")
+               "LA는 Rancho·DC·Jersey·DC2·DC3·Rancho_plant2의 합계이며, TRANSFER는 창고 간 이동 중 물량입니다. "
+               "🖱️ **표에서 품목 행을 클릭하면 바로 아래에 판매 추이 그래프가 나타납니다.**")
+
+    # --- ②-1 선택 품목: 판매 추이 vs 수요계획 vs 현재고 ---
+    try:
+        _picked = list(_ev.selection.rows) if _ev is not None else []
+    except Exception:
+        _picked = []
+    if not _picked:
+        with st.expander("📈 품목별 판매 추이 (표 행 클릭 대신 선택)", expanded=False):
+            leafs0 = disp[disp['제품코드'].astype(str).str.strip() != '']
+            _o = ['(선택 안 함)'] + [f"{i+1}. {r['제품코드']} {r['제품명']}" for i, r in leafs0.iterrows()]
+            _p = st.selectbox("품목 선택", _o, index=0, key="inv_item_pick",
+                              label_visibility="collapsed")
+            if _p != '(선택 안 함)':
+                _picked = [int(_p.split('.')[0]) - 1]
+
+    if _picked and _picked[0] < len(disp):
+        _row = disp.iloc[_picked[0]]
+        _code = str(_row['제품코드']).strip()
+        if not _code:
+            st.info("소계·합계 행입니다. 개별 품목 행을 선택해주세요.")
+        else:
+            _stock = float(_row['전국재고'])
+            _avg = float(_row['월평균판매'])
+            st.markdown(f"###### 📈 {_code} {_row['제품명']} — 판매 추이 · 수요계획 · 현재고")
+
+            hist = sales[sales['제품코드'] == _code].groupby('기준월', as_index=False)['실적수량'].sum() \
+                if not sales.empty else pd.DataFrame(columns=['기준월', '실적수량'])
+            try:
+                _pl = apply_newprod_plan(load_store(PLAN_STORE, PLAN_COLS, '계획수량'),
+                                         file_mtime(NEWPROD_STORE))
+                _pl = apply_period_rules(_pl, 'plan', monthly_merge=False)
+                plan_s = _pl[_pl['제품코드'] == _code].groupby('기준월', as_index=False)['계획수량'].sum()
+            except Exception:
+                plan_s = pd.DataFrame(columns=['기준월', '계획수량'])
+
+            months_all = sorted(set(hist['기준월'].astype(str)) | set(plan_s['기준월'].astype(str)))
+            if months_all:
+                h = hist.set_index(hist['기준월'].astype(str))['실적수량'].reindex(months_all)
+                pl = plan_s.set_index(plan_s['기준월'].astype(str))['계획수량'].reindex(months_all)
+                if PLOTLY_OK:
+                    def _lab(x):
+                        try:
+                            return pd.to_datetime(str(x) + '-01').strftime("%b '%y")
+                        except Exception:
+                            return str(x)
+                    fg = go.Figure()
+                    fg.add_trace(go.Scatter(x=months_all, y=list(h.values), name='실제 판매',
+                                            mode='lines+markers', connectgaps=False,
+                                            line=dict(shape='spline', smoothing=1.3, width=3,
+                                                      color='#1E4D9A'),
+                                            marker=dict(size=10, color='#BBD6F2',
+                                                        line=dict(width=2.5, color='#1E4D9A')),
+                                            hovertemplate='%{x}<br>판매: %{y:,.0f}<extra></extra>'))
+                    fg.add_trace(go.Scatter(x=months_all, y=list(pl.values), name='수요계획',
+                                            mode='lines+markers', connectgaps=False,
+                                            line=dict(shape='spline', smoothing=1.3, width=3,
+                                                      color='#E8833A', dash='dot'),
+                                            marker=dict(size=9, color='#FBDCC0',
+                                                        line=dict(width=2.5, color='#E8833A')),
+                                            hovertemplate='%{x}<br>계획: %{y:,.0f}<extra></extra>'))
+                    # 🎯 당월 오더(확정+미확정)와 잔여 계획
+                    try:
+                        _pg = apply_period_rules(load_store(PROG_STORE, PROG_COLS, '실적수량'), 'actual')
+                    except Exception:
+                        _pg = pd.DataFrame(columns=['기준월', '제품코드', '마감여부', '실적수량'])
+                    if not _pg.empty:
+                        _cm = sorted([m for m in _pg['기준월'].unique()
+                                      if isinstance(m, str) and m.strip()])[-1]
+                        _pc = _pg[(_pg['제품코드'] == _code) & (_pg['기준월'] == _cm)]
+                        if _cm in months_all and not _pc.empty:
+                            _sts = _pc['마감여부'].astype(str)
+                            try:
+                                _mn = str(int(_cm[5:7]))
+                            except Exception:
+                                _mn = ''
+                            _cur = _sts.str.contains('확정') & ~_sts.str.contains('미확정') & \
+                                (_sts.str.contains(f"{_mn}월") if _mn else True)
+                            _ordered = float(_pc[_cur | _sts.str.contains('미확정')]['실적수량'].sum())
+                            _prev_m = [m for m in months_all if m < _cm]
+                            _x0 = _prev_m[-1] if _prev_m else _cm
+                            _y0 = float(h.get(_x0)) if (_prev_m and pd.notna(h.get(_x0))) else None
+                            fg.add_trace(go.Scatter(
+                                x=([_x0, _cm] if _y0 is not None else [_cm]),
+                                y=([_y0, _ordered] if _y0 is not None else [_ordered]),
+                                name='당월 오더(확정+미확정)', mode='lines+markers',
+                                line=dict(width=3, color='#1E4D9A', dash='dot'),
+                                marker=dict(size=10, color='#FFFFFF',
+                                            line=dict(width=2.5, color='#1E4D9A')),
+                                hovertemplate='%{x}<br>당월 오더: %{y:,.0f}<extra></extra>'))
+                            _plan_cm = pl.get(_cm)
+                            if pd.notna(_plan_cm) and float(_plan_cm) > _ordered:
+                                _rest = float(_plan_cm) - _ordered
+                                fg.add_trace(go.Scatter(
+                                    x=[_cm, _cm], y=[_ordered, float(_plan_cm)],
+                                    name='잔여 계획', mode='lines+text',
+                                    line=dict(width=3, color='#D64545'),
+                                    text=['', f" 잔여 {int(round(_rest)):,}"],
+                                    textposition='middle right',
+                                    textfont=dict(size=12, color='#D64545'),
+                                    hovertemplate=f'잔여 계획: {_rest:,.0f}<extra></extra>'))
+
+                    if _stock > 0:
+                        fg.add_hline(y=_stock, line_dash='solid', line_color='#4CAF7D', line_width=2,
+                                     annotation_text=f"현재고 {int(round(_stock)):,}",
+                                     annotation_position='top left')
+                    if _avg > 0:
+                        fg.add_hline(y=_avg, line_dash='dash', line_color='#9AA4B1',
+                                     annotation_text=f"월평균 판매 {int(round(_avg)):,}",
+                                     annotation_position='bottom left')
+                    fg.update_layout(height=340, margin=dict(l=10, r=10, t=30, b=10),
+                                     xaxis=dict(type='category', tickmode='array', tickvals=months_all,
+                                                ticktext=[_lab(x) for x in months_all]),
+                                     yaxis=dict(title='박스', separatethousands=True, rangemode='tozero'),
+                                     legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                                                 xanchor='center', x=0.5),
+                                     hovermode='x unified')
+                    st.plotly_chart(fg, width='stretch', key=f"inv_item_chart_{_code}")
+                else:
+                    st.line_chart(pd.DataFrame({'실제 판매': h.values, '수요계획': pl.values},
+                                               index=months_all))
+                _mult = (_stock / _avg) if _avg > 0 else np.nan
+                st.caption("💡 파란 실선=실제 판매 / 파란 점선=당월 오더(확정+미확정) / 빨간 세로선=잔여 계획 / "
+                           "주황 점선=수요계획 / 초록 실선=현재고 / 회색 점선=월평균 판매. "
+                           + (f"현재고는 월평균 판매의 {_mult:.1f}배입니다. " if pd.notna(_mult) else "")
+                           + "판매 기간이 짧거나(신제품) 봉우리가 큰 품목(행사)은 평균보다 이 흐름으로 판단하세요.")
+            else:
+                st.info("이 품목의 판매·계획 이력이 없습니다.")
 
     # --- ③ 재고 추이 ---
     if len(dates) >= 2:
