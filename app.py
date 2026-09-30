@@ -1311,6 +1311,9 @@ INV_BLOCKS = {'LA': 'AA', 'Cranbury': 'AE', 'Chicago': 'AI', 'Texas': 'AM'}  # �
 INV_TRANSFER_COL = 'AQ'          # 창고 간 이동 중 수량 (단일 열)
 INV_TRANSFER = 'TRANSFER'
 INV_WAREHOUSES = list(INV_BLOCKS.keys())
+# [재고 추이 차트] y축 하한(박스). 0부터 그리면 변화가 눌려 보이므로 바닥을 올려 잡는다.
+#   None으로 두면 자동(0부터). 상한은 지정하지 않아 데이터가 커져도 잘리지 않는다.
+INV_TREND_YMIN = 2_000_000
 
 
 def idx_to_col_letter(i):
@@ -3528,8 +3531,8 @@ def render_inventory_tab(item_info, sel_countries):
         pick_date = st.selectbox("📅 재고 기준일자", dates, index=len(dates) - 1, key="inv_pick_date")
     with c2:
         _u = load_meta('재고갱신')
-        st.caption(f"기초재고(Begin Stock) 기준 / 보유 {len(dates)}일치"
-                   + (f" / 갱신 {_u}" if _u else ""))
+        st.caption(f"기초재고(Begin Stock) 기준 · 스냅샷 {len(dates)}일분 저장됨"
+                   + (f" · 최근 갱신 {_u}" if _u else ""))
 
     d = inv[inv['기준일자'] == pick_date].copy()
     d['제품코드'] = d['제품코드'].replace(PRODUCT_MAPPING)
@@ -3645,10 +3648,14 @@ def render_inventory_tab(item_info, sel_countries):
                           xaxis=dict(title='박스', separatethousands=True, rangemode='tozero'))
         st.plotly_chart(fig, width='stretch', key="inv_cls_chart")
 
+    _tot_stock = float(d['기초재고'].sum())
+    _tot_avg = float(grp['월평균판매'].sum())
+    _tot_days = (_tot_stock / _tot_avg * 30) if _tot_avg > 0 else np.nan
     wtot = d.groupby('창고', as_index=False)['기초재고'].sum().sort_values('기초재고', ascending=False)
     st.caption("창고별: " + ' / '.join(f"{r['창고']} {int(round(r['기초재고'])):,}"
                                      for _, r in wtot.iterrows())
-               + f"  →  전국 {int(round(d['기초재고'].sum())):,} 박스")
+               + f"  →  전국 {int(round(_tot_stock)):,} 박스"
+               + (f" (전사 재고 {_tot_days:.0f}일치)" if pd.notna(_tot_days) else ""))
 
     # --- ② 품목별 재고와 소진 개월 수 ---
     st.markdown("---")
@@ -3790,10 +3797,21 @@ def render_inventory_tab(item_info, sel_countries):
             except Exception:
                 plan_s = pd.DataFrame(columns=['기준월', '계획수량'])
 
-            months_all = sorted(set(hist['기준월'].astype(str)) | set(plan_s['기준월'].astype(str)))
+            # 당월(진척도 대상월)은 계획·실적이 없어도 반드시 표시 (계획 0인데 오더가 난 경우를 드러냄)
+            try:
+                _pg0 = load_store(PROG_STORE, PROG_COLS, '실적수량')
+                _cur_m = sorted([m for m in _pg0['기준월'].unique()
+                                 if isinstance(m, str) and m.strip()])[-1] if not _pg0.empty else None
+            except Exception:
+                _cur_m = None
+            months_all = sorted(set(hist['기준월'].astype(str)) | set(plan_s['기준월'].astype(str))
+                                | ({_cur_m} if _cur_m else set()))
             if months_all:
                 h = hist.set_index(hist['기준월'].astype(str))['실적수량'].reindex(months_all)
                 pl = plan_s.set_index(plan_s['기준월'].astype(str))['계획수량'].reindex(months_all)
+                # 실적/오더가 있는 달의 계획 결측은 0으로 (계획 미수립을 '0'으로 명시)
+                if _cur_m in months_all and pd.isna(pl.get(_cur_m)):
+                    pl.loc[_cur_m] = 0.0
                 if PLOTLY_OK:
                     def _lab(x):
                         try:
@@ -3845,16 +3863,24 @@ def render_inventory_tab(item_info, sel_countries):
                                             line=dict(width=2.5, color='#1E4D9A')),
                                 hovertemplate='%{x}<br>당월 오더: %{y:,.0f}<extra></extra>'))
                             _plan_cm = pl.get(_cm)
-                            if pd.notna(_plan_cm) and float(_plan_cm) > _ordered:
-                                _rest = float(_plan_cm) - _ordered
+                            _plan_cm = 0.0 if pd.isna(_plan_cm) else float(_plan_cm)
+                            _rest = _plan_cm - _ordered
+                            if abs(_rest) > 0.5:
+                                # 잔여(+): 아직 못 채운 계획 / 초과(−): 계획보다 더 나간 물량
+                                _over = _rest < 0
+                                _rtext = (f" 초과 {int(round(abs(_rest))):,}" if _over
+                                          else f" 잔여 {int(round(_rest)):,}")
+                                _col = '#B03A5B' if _over else '#D64545'
                                 fg.add_trace(go.Scatter(
-                                    x=[_cm, _cm], y=[_ordered, float(_plan_cm)],
-                                    name='잔여 계획', mode='lines+text',
-                                    line=dict(width=3, color='#D64545'),
-                                    text=['', f" 잔여 {int(round(_rest)):,}"],
+                                    x=[_cm, _cm], y=[_ordered, _plan_cm],
+                                    name=('계획 초과' if _over else '잔여 계획'), mode='lines+text',
+                                    line=dict(width=3, color=_col,
+                                              dash=('dash' if _over else 'solid')),
+                                    text=(['', _rtext] if not _over else [_rtext, '']),
                                     textposition='middle right',
-                                    textfont=dict(size=12, color='#D64545'),
-                                    hovertemplate=f'잔여 계획: {_rest:,.0f}<extra></extra>'))
+                                    textfont=dict(size=12, color=_col),
+                                    hovertemplate=(f"{'계획 초과' if _over else '잔여 계획'}: "
+                                                   f"{abs(_rest):,.0f}<extra></extra>")))
 
                     if _stock > 0:
                         fg.add_hline(y=_stock, line_dash='solid', line_color='#4CAF7D', line_width=2,
@@ -3878,6 +3904,7 @@ def render_inventory_tab(item_info, sel_countries):
                 _mult = (_stock / _avg) if _avg > 0 else np.nan
                 st.caption("💡 파란 실선=실제 판매 / 파란 점선=당월 오더(확정+미확정) / 빨간 세로선=잔여 계획 / "
                            "주황 점선=수요계획 / 초록 실선=현재고 / 회색 점선=월평균 판매. "
+                           "계획이 0인데 오더가 발생한 달도 그대로 표시되며, 이 경우 '계획 초과'로 나타납니다. "
                            + (f"현재고는 월평균 판매의 {_mult:.1f}배입니다. " if pd.notna(_mult) else "")
                            + "판매 기간이 짧거나(신제품) 봉우리가 큰 품목(행사)은 평균보다 이 흐름으로 판단하세요.")
             else:
@@ -3895,17 +3922,57 @@ def render_inventory_tab(item_info, sel_countries):
             tr = tr[tr['제품코드'] == pick_code.split(' ')[0]]
         g = tr.groupby('기준일자', as_index=False)['기초재고'].sum().sort_values('기준일자')
         if PLOTLY_OK and not g.empty:
+            # 🎯 x축을 '순번'으로 두어 업로드한 날짜만 등간격으로 배치한다.
+            #    (날짜축으로 두면 미업로드일·주말이 빈 칸으로 벌어짐)
+            _dates = g['기준일자'].astype(str).tolist()
+            _idx = list(range(len(_dates)))
+            def _dlab(x):
+                try:
+                    dt = pd.to_datetime(str(x))
+                    return f"{dt.month}/{dt.day}"
+                except Exception:
+                    return str(x)
+            _ticks = [_dlab(x) for x in _dates]
+            # 점이 많아지면 라벨이 겹치므로 일정 간격으로만 표시
+            _step = max(1, len(_idx) // 14)
+            _tv = _idx[::_step]
+            _tt = [_ticks[i] for i in _tv]
+
             fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(x=g['기준일자'], y=g['기초재고'], name='재고',
+            fig2.add_trace(go.Scatter(x=_idx, y=g['기초재고'], name='재고',
                                       mode='lines+markers',
                                       line=dict(shape='spline', smoothing=1.3, width=3, color='#1E4D9A'),
-                                      marker=dict(size=10, color='#BBD6F2',
+                                      marker=dict(size=9, color='#BBD6F2',
                                                   line=dict(width=2.5, color='#1E4D9A')),
-                                      hovertemplate='%{x}<br>재고: %{y:,.0f}<extra></extra>'))
+                                      customdata=_dates,
+                                      hovertemplate='%{customdata}<br>재고: %{y:,.0f}<extra></extra>'))
+            # y축 하한: 0부터 그리면 변화폭이 눌려 보이므로 바닥을 올려 잡는다
+            _ymin_default = float(INV_TREND_YMIN) if INV_TREND_YMIN else 0.0
+            _ymin = st.number_input("추이 그래프 Y축 하한 (박스, 0이면 자동)",
+                                    min_value=0, max_value=100_000_000,
+                                    value=int(_ymin_default), step=100_000, key="inv_trend_ymin")
+            _lo, _hi = float(g['기초재고'].min()), float(g['기초재고'].max())
+            _note = ''
+            if _ymin:
+                if _ymin > _lo:               # 선이 잘리지 않도록 최저값 바로 아래로 자동 조정
+                    _span = max(_hi - _lo, 1.0)
+                    _ymin = max(0.0, _lo - _span * 0.15)
+                    _note = (f"설정 하한이 실제 최저 재고({int(round(_lo)):,})보다 높아 "
+                             f"{int(round(_ymin)):,}로 자동 조정했습니다.")
+                _yaxis = dict(title='박스', separatethousands=True,
+                              range=[_ymin, _hi + max(_hi - _ymin, 1.0) * 0.12])
+            else:
+                _yaxis = dict(title='박스', separatethousands=True, rangemode='tozero')
+
             fig2.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10), showlegend=False,
-                               yaxis=dict(title='박스', separatethousands=True, rangemode='tozero'),
-                               hovermode='x unified')
+                               xaxis=dict(tickmode='array', tickvals=_tv, ticktext=_tt,
+                                          showgrid=False),
+                               yaxis=_yaxis, hovermode='closest')
             st.plotly_chart(fig2, width='stretch', key=f"inv_trend_{pick_code}")
+            st.caption("💡 업로드한 날짜만 순서대로 표시됩니다. 재고를 올리지 않은 날(주말 등)은 "
+                       "가로축에서 생략되어 바로 다음 업로드일과 이어집니다. "
+                       "Y축 하한을 올리면 변화폭이 크게 보이며, 0으로 두면 0부터 그립니다."
+                       + (f" ⚠️ {_note}" if _note else ""))
         else:
             st.line_chart(g.set_index('기준일자')['기초재고'])
 
