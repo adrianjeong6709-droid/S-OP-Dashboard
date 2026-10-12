@@ -4,7 +4,7 @@ import numpy as np
 import re
 import os
 import io
-from datetime import timedelta
+from datetime import timedelta, datetime, date
 
 # 🎯 콤비네이션 차트용 Plotly (미설치 시에도 대시보드는 정상 작동)
 try:
@@ -466,18 +466,104 @@ def process_plan_upload(plan_file, master_lookup):
     plan_df['기준월'] = plan_df[plan_month_col].apply(parse_month)
     return plan_df.groupby(['기준월'] + GROUP_COLS, as_index=False)['계획수량'].sum()
 
+# =============================================================
+# 🎯 [캐나다 수요계획 양식 대응]
+#   표준 표기(캐나다에 요청한 규칙): 영문 월 앞 3철자 + 점 + 연도, 띄어쓰기 없음 → 'Nov.2026'
+#   파서는 이 표준을 권장하되, 한 글자 실수(공백/풀네임/점 누락)로 월이 조용히 누락되는
+#   사고를 막기 위해 변형 표기도 함께 인식한다. 표준을 벗어난 컬럼은 업로드 화면에
+#   '비표준 표기'로 표시되므로 캐나다에 바로 피드백할 수 있다.
+# =============================================================
+CAN_MONTH_ALIAS = {
+    'jan': 1, 'january': 1, 'feb': 2, 'febr': 2, 'february': 2, 'mar': 3, 'march': 3,
+    'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+    'aug': 8, 'august': 8, 'sep': 9, 'sept': 9, 'september': 9, 'oct': 10, 'october': 10,
+    'nov': 11, 'november': 11, 'dec': 12, 'december': 12,
+}
+CAN_MONTH_STD_RE = re.compile(r'^([A-Za-z]{3})\.(\d{4})$')           # 표준: Nov.2026
+CAN_MONTH_RE     = re.compile(r'([A-Za-z]{3,9})\s*[\.\-/,]?\s*(\d{4})')  # 허용: Nov. 2026 / November . 2026
+CAN_MONTH_NUM_RE = re.compile(r'^(\d{4})[\.\-/](\d{1,2})$')          # 허용: 2026-11 / 2026.11
+
+
+def can_month_label(col, strict=False):
+    """캐나다 수요계획 컬럼명 → 'YYYY-MM'. 월 컬럼이 아니면 None.
+       strict=True면 표준 표기(Nov.2026)만 인정"""
+    if isinstance(col, (pd.Timestamp, datetime, date)):   # 엑셀 날짜 셀 헤더
+        return pd.Timestamp(col).strftime('%Y-%m')
+    s = str(col).replace('\xa0', ' ').strip()
+
+    m = CAN_MONTH_STD_RE.match(s)          # 표준 표기 우선
+    if m and CAN_MONTH_ALIAS.get(m.group(1).lower()):
+        yr = int(m.group(2))
+        if 2000 <= yr <= 2099:
+            return f"{yr:04d}-{CAN_MONTH_ALIAS[m.group(1).lower()]:02d}"
+    if strict:
+        return None
+
+    m = CAN_MONTH_NUM_RE.match(s)          # 숫자 표기
+    if m:
+        yr, mon = int(m.group(1)), int(m.group(2))
+        if 2000 <= yr <= 2099 and 1 <= mon <= 12:
+            return f"{yr:04d}-{mon:02d}"
+
+    m = CAN_MONTH_RE.search(s)             # 변형 표기 (공백·풀네임 등)
+    if not m:
+        return None
+    mon = CAN_MONTH_ALIAS.get(m.group(1).strip().lower())
+    if mon is None:
+        return None
+    yr = int(m.group(2))
+    if not (2000 <= yr <= 2099):
+        return None
+    return f"{yr:04d}-{mon:02d}"
+
+
+def can_month_is_std(col):
+    """표준 표기(Nov.2026) 여부"""
+    return can_month_label(col, strict=True) is not None
+
+
+def pick_can_sheet(xl):
+    """작업용 시트가 섞여 와도 수요계획 시트를 골라낸다"""
+    names = list(xl.sheet_names)
+    for nm in names:                       # 1순위: 시트명에 forecast/수요/계획
+        if re.search(r'forecast|수요|계획', str(nm), flags=re.I):
+            return nm
+    best, best_n = None, 0                 # 2순위: 월 컬럼이 가장 많은 시트
+    for nm in names:
+        try:
+            head = xl.parse(nm, nrows=0)
+        except Exception:
+            continue
+        n = sum(1 for c in head.columns if can_month_label(c))
+        if n > best_n:
+            best, best_n = nm, n
+    if best is not None and best_n >= 3:
+        return best
+    return names[0] if names else 0
+
+
 def process_can_upload(can_plan_file, master_lookup):
-    can_df = pd.read_excel(can_plan_file)
+    all_sheets = []
+    try:
+        xl = pd.ExcelFile(can_plan_file)
+        all_sheets = list(xl.sheet_names)
+        sheet = pick_can_sheet(xl)
+        can_df = xl.parse(sheet)
+    except Exception:
+        sheet = 0
+        can_df = pd.read_excel(can_plan_file)
     can_df.rename(columns={can_df.columns[0]: '제품코드'}, inplace=True)
     can_df['제품코드'] = clean_code(can_df['제품코드']).replace(PRODUCT_MAPPING)
 
-    month_pattern = re.compile(r'[A-Za-z]{3,}\.?\s*\d{4}')
-    date_cols = [c for c in can_df.columns if month_pattern.search(str(c))]
+    month_map = {c: can_month_label(c) for c in can_df.columns if c != '제품코드'}
+    date_cols = [c for c, v in month_map.items() if v]
+    skipped = [str(c) for c, v in month_map.items() if not v]
     if not date_cols:
         return None
 
-    can_melt = can_df.melt(id_vars=['제품코드'], value_vars=date_cols, var_name='기준월', value_name='계획수량')
-    can_melt['기준월'] = can_melt['기준월'].apply(parse_month)
+    can_melt = can_df.melt(id_vars=['제품코드'], value_vars=date_cols, var_name='_col', value_name='계획수량')
+    can_melt['기준월'] = can_melt['_col'].map(month_map)
+    can_melt = can_melt.drop(columns=['_col'])
     can_melt['계획수량'] = pd.to_numeric(can_melt['계획수량'], errors='coerce').fillna(0)
 
     can_mask = master_lookup.astype(str).apply(lambda x: x.str.contains('캐나다|can|canada', case=False, na=False)).any(axis=1)
@@ -494,7 +580,18 @@ def process_can_upload(can_plan_file, master_lookup):
         can_melt['영업지점명'] = '캐나다'
         can_melt['영업사원명'] = '캐나다'
 
-    return can_melt.groupby(['기준월'] + GROUP_COLS, as_index=False)['계획수량'].sum()
+    out = can_melt.groupby(['기준월'] + GROUP_COLS, as_index=False)['계획수량'].sum()
+    # 🎯 업로드 진단: 어떤 시트/어떤 컬럼을 월로 읽었는지 사이드바에서 확인 가능
+    out.attrs['can_report'] = {
+        'sheet': str(sheet),
+        'sheets': all_sheets,
+        'rows': int(len(can_df)),
+        'codes': int(can_df['제품코드'].nunique()),
+        'months': {str(c): month_map[c] for c in date_cols},
+        'skipped': skipped,
+        'nonstd': [str(c) for c in date_cols if not can_month_is_std(c)],
+    }
+    return out
 
 def process_actual_upload(actual_file, master_lookup):
     actual_df = normalize_cols(pd.read_excel(actual_file))
@@ -2751,8 +2848,45 @@ def render_detail_table(df, index_cols, months_list, sort_month=None, popup_df=N
         st.dataframe(styled, width=df_width(len(result.columns)), hide_index=True, height=h,
                      column_config=col_cfg(len(result.columns)))
 
-    totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
+    # 🎯 대표 수치는 '제품 총량 기준'(탭1과 동일). 세부 행 평균은 보조 지표로 아래에 표시.
+    _prod_tot, _detail_avg = None, None
+    if prod_cols:
+        try:
+            _sub2, _ = build_flat_month_table(df, prod_cols, months_list, include_qty=True)
+            _sub2 = _sub2[_sub2[qty_cols].fillna(0).sum(axis=1) != 0]
+            _prod_tot = {c: (_sub2[c].mean() if '정확도' in c else _sub2[c].sum()) for c in value_cols}
+        except Exception:
+            _prod_tot = None
+
+    if _prod_tot is not None:
+        totals = [_prod_tot[c] for c in value_cols]            # 대표: 제품 총량 기준
+        _detail_avg = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
+    else:
+        totals = [flat[c].mean() if '정확도' in c else flat[c].sum() for c in value_cols]
     render_total_row(ordered, value_cols, totals)
+
+    # 보조 지표: 세부 행(제품×지점×사원) 정확도의 단순 평균
+    if _detail_avg is not None:
+        try:
+            _lbl = ['(참고) 세부 행 평균'] + [''] * (len(ordered) - 1)
+            _row = [(v if '정확도' in c else np.nan) for c, v in zip(value_cols, _detail_avg)]
+            _td = pd.DataFrame([_lbl + _row], columns=ordered + value_cols)
+            st.dataframe(_td.style.format(build_format_dict(value_cols)).apply(
+                lambda x: ['background-color: #f4f6f8; color: #555555'] * len(x), axis=1),
+                width=df_width(len(_td.columns)), hide_index=True,
+                column_config=col_cfg(len(_td.columns)))
+            _msg = ' / '.join(
+                f"{m}: 대표 {_prod_tot[f'{m} 정확도']*100:.1f}% vs 세부 행 평균 {flat[f'{m} 정확도'].mean()*100:.1f}%"
+                for m in mp if pd.notna(_prod_tot.get(f"{m} 정확도"))
+                and pd.notna(flat[f"{m} 정확도"].mean()))
+            st.caption("💡 **전체 합계/평균 = 제품 총량 기준(탭1과 동일)** — 보고용 대표 수치입니다. "
+                       "아래 '(참고) 세부 행 평균'은 제품×지점×사원 단위 정확도를 단순 평균한 값으로, "
+                       "대표 수치보다 낮게 나오는 것이 정상입니다. 지점별로 쪼개면 초과·미달이 상쇄되지 않고 "
+                       "'계획은 있는데 실적 0'인 행이 0%로 반영되기 때문입니다. "
+                       "**두 값의 차이가 클수록 조직 간 계획·실적 편차가 크다는 신호**입니다."
+                       + (f"  ({_msg})" if _msg else ""))
+        except Exception:
+            pass
 
     try:
         picked = list(ev.selection.rows) if ev is not None else []
@@ -3106,8 +3240,22 @@ def render_progress_tab():
     merged = pd.merge(merged, item_info, on='제품코드', how='left')
     merged['제품명'] = merged['제품명'].fillna('품목마스터 누락')
     merged['국가'] = merged['국가'].fillna('미분류')
+
+    # 🔍 집계 차이 추적: 어느 단계에서 얼마가 빠지는지 기록
+    _diag, _base0 = [], float(merged['실적수량'].sum())
+    _d1 = merged[merged['제품코드'].isin(final_drop_codes)]
+    if not _d1.empty and _d1['실적수량'].sum() > 0:
+        _diag.append(('제외 품목·수입품(TRA.GOODS)', float(_d1['실적수량'].sum()),
+                      sorted(_d1.groupby('제품코드')['실적수량'].sum()
+                             .sort_values(ascending=False).head(8).items())))
     merged = merged[~merged['제품코드'].isin(final_drop_codes)]
+
     for col in GROUP_COLS + ['제품명']:
+        _d2 = merged[merged[col] == '미상']
+        if not _d2.empty and _d2['실적수량'].sum() > 0:
+            _diag.append((f"{col} 미상", float(_d2['실적수량'].sum()),
+                          sorted(_d2.groupby('제품코드')['실적수량'].sum()
+                                 .sort_values(ascending=False).head(8).items())))
         merged = merged[merged[col] != '미상']
 
     if merged.empty:
@@ -3115,7 +3263,24 @@ def render_progress_tab():
 
     all_countries = sorted(merged['국가'].unique())
     sel_countries = st.multiselect("🌍 국가 필터", all_countries, default=all_countries, key="prog_country")
+    _d3 = merged[~merged['국가'].isin(sel_countries)]
+    if not _d3.empty and _d3['실적수량'].sum() > 0:
+        _diag.append(('국가 필터 제외', float(_d3['실적수량'].sum()),
+                      sorted(_d3.groupby('제품코드')['실적수량'].sum()
+                             .sort_values(ascending=False).head(8).items())))
     merged = merged[merged['국가'].isin(sel_countries)]
+
+    # 🔍 원본 대비 집계 차이 안내
+    _raw_conf = float(prog_m[prog_m['마감여부'].isin(sel_status)]['실적수량'].sum())
+    _now_conf = float(merged['실적수량'].sum())
+    if abs(_raw_conf - _now_conf) > 0.5:
+        with st.expander(f"⚠️ 원본 대비 {int(round(_raw_conf - _now_conf)):,} 박스가 집계에서 제외됨 "
+                         f"(원본 {int(round(_raw_conf)):,} → 표시 {int(round(_now_conf)):,})"):
+            for _nm, _qty, _top in _diag:
+                st.markdown(f"**{_nm}: {int(round(_qty)):,} 박스**")
+                st.caption('  /  '.join(f"{c} {int(round(q)):,}" for c, q in _top))
+            st.caption("제외 품목 리스트·수입품(TRA.GOODS)·조직 미상·국가 필터에 걸린 물량입니다. "
+                       "원본 합계와 대조할 때 이 값을 더하면 맞아떨어집니다.")
     if merged.empty:
         return st.info("선택한 국가에 해당하는 데이터가 없습니다.")
 
@@ -4012,8 +4177,21 @@ if IS_ADMIN:
             return process_actual_upload(bio, master_lookup)
         return None
 
-    def _month_commit_widget(uploaded, kind, commit_fn, key_prefix, label):
-        """업로드 파일에서 월을 파싱해 보여주고, 선택한 월만 커밋 (파싱은 캐시됨)"""
+    def _stored_months(source=None):
+        """히스토리에 이미 저장된 월 집합 (source=None이면 실적)"""
+        try:
+            if source is None:
+                s = load_store(ACT_STORE, ACT_COLS, '실적수량')
+            else:
+                s = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
+                s = s[s['소스'] == source]
+            return set(m for m in s['기준월'].dropna().unique() if isinstance(m, str) and m.strip())
+        except Exception:
+            return set()
+
+    def _month_commit_widget(uploaded, kind, commit_fn, key_prefix, label, stored=None, future_only=False):
+        """업로드 파일에서 월을 파싱해 보여주고, 선택한 월만 커밋 (파싱은 캐시됨)
+           future_only=True: 기본 선택을 '익월 이후'로 한정 (과거 마감월·당월은 손대지 않음)"""
         if uploaded is None:
             return
         if not masters_ready:
@@ -4029,7 +4207,49 @@ if IS_ADMIN:
             st.sidebar.warning(f"{label}: 인식된 데이터가 없습니다.")
             return
         months_found = sorted(parsed['기준월'].dropna().unique())
-        sel = st.sidebar.multiselect(f"↳ {label} 반영할 월", months_found, default=months_found, key=f"{key_prefix}_months")
+
+        # 🎯 [캐나다] 양식이 자주 바뀌므로 어떻게 읽었는지 바로 확인할 수 있게 노출
+        rpt = parsed.attrs.get('can_report')
+        if rpt:
+            with st.sidebar.expander(f"🔍 {label} 인식 결과 확인", expanded=False):
+                st.caption(f"시트: **{rpt['sheet']}**"
+                           + (f" (파일 내 시트 {len(rpt['sheets'])}개)" if len(rpt['sheets']) > 1 else ""))
+                st.caption(f"품목 {rpt['codes']}개 / 행 {rpt['rows']}개 / 월 컬럼 {len(rpt['months'])}개")
+                if rpt['months']:
+                    st.dataframe(
+                        pd.DataFrame({'파일 컬럼명': list(rpt['months'].keys()),
+                                      '인식된 월': list(rpt['months'].values())}),
+                        hide_index=True, use_container_width=True, height=220)
+                if rpt['skipped']:
+                    st.caption("월로 읽지 않은 컬럼 (품목정보·비고 등이면 정상):")
+                    st.code('\n'.join(rpt['skipped'][:40]), language=None)
+                if rpt.get('nonstd'):
+                    st.caption(f"⚠️ 표준 표기(`Nov.2026`)를 벗어난 월 컬럼 {len(rpt['nonstd'])}개 "
+                               "— 인식은 했으나 캐나다에 표기 통일 요청 권장:")
+                    st.code('\n'.join(rpt['nonstd'][:40]), language=None)
+                else:
+                    st.caption("✅ 모든 월 컬럼이 표준 표기(`Nov.2026`)입니다.")
+
+        # 🎯 기본 선택: future_only면 익월 이후만 (과거 마감월·당월은 체크 해제 상태로 시작)
+        if future_only:
+            cur = pd.Timestamp.today().strftime('%Y-%m')
+            default_months = [m for m in months_found if m > cur]
+            if not default_months:
+                default_months = months_found
+            else:
+                st.sidebar.caption(f"기본 선택은 **익월 이후({default_months[0]}~)** 입니다. "
+                                   "과거·당월을 고치려면 아래에서 직접 추가하세요.")
+        else:
+            default_months = months_found
+
+        sel = st.sidebar.multiselect(f"↳ {label} 반영할 월", months_found, default=default_months, key=f"{key_prefix}_months")
+
+        # 🎯 이미 저장된 월을 덮어쓰려 할 때 경고 (과거 마감월 수치가 바뀌는 사고 방지)
+        if stored:
+            over = sorted(set(sel) & set(stored))
+            if over:
+                st.sidebar.warning(f"⚠️ 이미 저장된 월을 덮어씁니다: {', '.join(over)}\n\n"
+                                   "과거 마감월 수치를 그대로 두려면 위 선택에서 해당 월을 빼주세요.")
         if st.sidebar.button(f"✅ {label} 히스토리 반영", key=f"{key_prefix}_btn"):
             if not sel:
                 st.sidebar.warning("반영할 월을 선택해주세요.")
@@ -4041,13 +4261,16 @@ if IS_ADMIN:
                 st.rerun()
 
     plan_file = st.sidebar.file_uploader("1. 수요계획 (USA,MEX)", type=['xlsx', 'csv'], key="up_plan")
-    _month_commit_widget(plan_file, 'plan', lambda d, m: upsert_plan(d, m, 'USMX'), "plan", "수요계획(USA,MEX)")
+    _month_commit_widget(plan_file, 'plan', lambda d, m: upsert_plan(d, m, 'USMX'), "plan", "수요계획(USA,MEX)",
+                         stored=_stored_months('USMX'))
 
     can_plan_file = st.sidebar.file_uploader("2. 수요계획 (CAN)", type=['xlsx', 'csv'], key="up_can")
-    _month_commit_widget(can_plan_file, 'can', lambda d, m: upsert_plan(d, m, 'CAN'), "can", "수요계획(CAN)")
+    _month_commit_widget(can_plan_file, 'can', lambda d, m: upsert_plan(d, m, 'CAN'), "can", "수요계획(CAN)",
+                         stored=_stored_months('CAN'), future_only=True)
 
     actual_file = st.sidebar.file_uploader("3. 출고 실적 (월 마감)", type=['xlsx', 'csv'], key="up_act")
-    _month_commit_widget(actual_file, 'act', lambda d, m: upsert_actual(d, m), "act", "출고실적")
+    _month_commit_widget(actual_file, 'act', lambda d, m: upsert_actual(d, m), "act", "출고실적",
+                         stored=_stored_months(None))
 
     adj_plan_file = st.sidebar.file_uploader("4. 영업기획 조정계획 (선택)", type=['xlsx', 'csv'], key="up_adj")
     if adj_plan_file is not None:
@@ -4576,8 +4799,9 @@ if master_ready and item_master_ready and exclusion_ready:
             with s_col1:
                 sort_pick = st.selectbox("🔽 품목 정렬 기준월", sort_opts, index=0, key="t3_sort_month")
             sort_month = None if sort_pick == '(최근 월 자동)' else sort_pick
-            st.caption("💡 행 구성: 제품코드 · 제품명 · 영업지점명 · 영업사원명 (고정) / 정확도 = 해당 행의 품목별 정확도 평균 / "
-                       "📍 제품 소계 = 해당 제품 전체 합계와 총량 기준 정확도(탭1과 동일 수치). "
+            st.caption("💡 행 구성: 제품코드 · 제품명 · 영업지점명 · 영업사원명 (고정). "
+                       "각 행의 정확도 = **그 행(제품×지점×사원)의 계획 합계 대비 실적 합계** 기준입니다. "
+                       "📍 제품 소계 = 해당 제품 전체 합계 기준 정확도(탭1과 동일 수치). "
                        "정렬은 위에서 고른 기준월의 정확도 오름차순(기본값은 조회 기간 중 최근 월). "
                        "🖱️ **표의 행을 클릭하면 그 제품·지점·사원의 거래처별 계획/실적 내역이 팝업으로 열립니다** "
                        "(📍 제품 소계 행을 클릭하면 그 제품의 전체 거래처가 표시됩니다).")
