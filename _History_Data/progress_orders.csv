@@ -32,10 +32,10 @@
 2026-10,1200019,101070156,Asian,West,Songho Choi,10월 출고 확정,72
 2026-10,1200019,101070162,Asian,West,Songho Choi,10월 출고 확정,1584
 2026-10,1200019,101070168,Asian,West,Songho Choi,10월 출고 확정,288
-2026-10,1200027,101002715,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,240
 2026-10,1200027,101002859,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,300
 2026-10,1200027,101004233,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,160
 2026-10,1200027,101004257,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,160
+2026-10,1200027,101070108,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,240
 2026-10,1200027,101070153,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,648
 2026-10,1200027,101070154,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,648
 2026-10,1200027,101070156,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,648
@@ -47,7 +47,6 @@
 2026-10,1200035,101002612,Asian,East,David Li,10월 출고 확정,600
 2026-10,1200035,101002612,Asian,East,David Li,출고 미확정,300
 2026-10,1200035,101002715,Asian,East,David Li,10월 출고 확정,360
-2026-10,1200035,101002715,Asian,East,David Li,출고 미확정,720
 2026-10,1200035,101002716,Asian,East,David Li,10월 출고 확정,324
 2026-10,1200035,101002859,Asian,East,David Li,10월 출고 확정,720
 2026-10,1200035,101002859,Asian,East,David Li,출고 미확정,360
@@ -69,6 +68,7 @@
 2026-10,1200035,101007391,Asian,East,David Li,10월 출고 확정,432
 2026-10,1200035,101007391,Asian,East,David Li,출고 미확정,72
 2026-10,1200035,101007402,Asian,East,David Li,출고 미확정,144
+2026-10,1200035,101070108,Asian,East,David Li,출고 미확정,720
 2026-10,1200035,101070112,Asian,East,David Li,10월 출고 확정,972
 2026-10,1200035,101070112,Asian,East,David Li,출고 미확정,162
 2026-10,1200035,101070117,Asian,East,David Li,출고 미확정,216
@@ -92,12 +92,12 @@
 2026-10,1200035,102002773,Asian,East,David Li,출고 미확정,90
 2026-10,1200035,902070007,Asian,East,David Li,출고 미확정,108
 2026-10,1200039,101002640,Asian,East,Juyoung Park,출고 미확정,36
-2026-10,1200039,101002715,Asian,East,Juyoung Park,출고 미확정,360
 2026-10,1200039,101003347,Asian,East,Juyoung Park,출고 미확정,324
 2026-10,1200039,101004141,Asian,East,Juyoung Park,출고 미확정,810
 2026-10,1200039,101004229,Asian,East,Juyoung Park,출고 미확정,162
 2026-10,1200039,101004257,Asian,East,Juyoung Park,출고 미확정,576
 2026-10,1200039,101007391,Asian,East,Juyoung Park,출고 미확정,72
+2026-10,1200039,101070108,Asian,East,Juyoung Park,출고 미확정,360
 2026-10,1200039,101070112,Asian,East,Juyoung Park,출고 미확정,162
 2026-10,1200039,101070134,Asian,East,Juyoung Park,출고 미확정,324
 2026-10,1200039,101070162,Asian,East,Juyoung Park,출고 미확정,72
@@ -140,56 +140,63 @@
 2026-10,1200064,101070162,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,144
 2026-10,1200064,101070168,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,432
 2026-10,1200077,101001911,National,National Club,Earnest Sinambela,10월 출고 확정,75
-2026-10,1200077,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,2475
-2026-10,1200077,101004196,National,National Club,Earnest Sinambela,10월 출고 확정,6336
-2026-10,1200077,101070127,National,National Club,Earnest Sinambela,10월 출고 확정,51200
-2026-10,1200077,101070156,National,National Club,Earnest Sinambela,10월 출고 확정,1323
-2026-10,1200077,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,20025
-2026-10,1200077,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,1980
-2026-10,1200095,101002381,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,225
-2026-10,1200095,101002381,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,150
+2026-10,1200077,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,2070
+2026-10,1200077,101004125,National,National Club,Earnest Sinambela,출고 미확정,405
+2026-10,1200077,101004196,National,National Club,Earnest Sinambela,10월 출고 확정,5184
+2026-10,1200077,101004196,National,National Club,Earnest Sinambela,출고 미확정,1152
+2026-10,1200077,101070127,National,National Club,Earnest Sinambela,10월 출고 확정,44800
+2026-10,1200077,101070127,National,National Club,Earnest Sinambela,출고 미확정,6400
+2026-10,1200077,101070156,National,National Club,Earnest Sinambela,10월 출고 확정,1071
+2026-10,1200077,101070156,National,National Club,Earnest Sinambela,출고 미확정,252
+2026-10,1200077,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,18000
+2026-10,1200077,101070163,National,National Club,Earnest Sinambela,출고 미확정,2025
+2026-10,1200077,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,1890
+2026-10,1200077,101070166,National,National Club,Earnest Sinambela,출고 미확정,90
+2026-10,1200095,101002381,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,150
+2026-10,1200095,101002381,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,225
 2026-10,1200095,101002612,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,300
 2026-10,1200095,101002612,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1200
-2026-10,1200095,101002640,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,720
-2026-10,1200095,101002640,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,792
-2026-10,1200095,101002859,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,825
-2026-10,1200095,101002859,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1320
-2026-10,1200095,101003241,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,2145
-2026-10,1200095,101003282,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,36
-2026-10,1200095,101003282,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,72
-2026-10,1200095,101003347,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,384
-2026-10,1200095,101003347,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,384
-2026-10,1200095,101004174,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,495
-2026-10,1200095,101004174,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,990
+2026-10,1200095,101002640,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,324
+2026-10,1200095,101002640,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1188
+2026-10,1200095,101002859,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,495
+2026-10,1200095,101002859,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1650
+2026-10,1200095,101003241,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,1320
+2026-10,1200095,101003241,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,825
+2026-10,1200095,101003282,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,108
+2026-10,1200095,101003347,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,192
+2026-10,1200095,101003347,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,576
+2026-10,1200095,101004174,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,330
+2026-10,1200095,101004174,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1155
 2026-10,1200095,101004224,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,1440
 2026-10,1200095,101004224,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,768
-2026-10,1200095,101004229,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,144
-2026-10,1200095,101004229,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,216
-2026-10,1200095,101004230,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,936
-2026-10,1200095,101004230,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,720
-2026-10,1200095,101004233,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,1440
-2026-10,1200095,101004233,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,2016
+2026-10,1200095,101004229,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,72
+2026-10,1200095,101004229,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,288
+2026-10,1200095,101004230,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,432
+2026-10,1200095,101004230,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1224
+2026-10,1200095,101004233,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,768
+2026-10,1200095,101004233,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,2688
 2026-10,1200095,101004257,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,288
 2026-10,1200095,101004257,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,864
-2026-10,1200095,101005690,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,768
-2026-10,1200095,101005690,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1152
+2026-10,1200095,101005690,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,384
+2026-10,1200095,101005690,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1536
 2026-10,1200095,101006220,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,36
 2026-10,1200095,101006220,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,72
 2026-10,1200095,101070110,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,144
 2026-10,1200095,101070110,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,576
 2026-10,1200095,101070112,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,1152
 2026-10,1200095,101070112,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,3312
-2026-10,1200095,101070134,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,1536
-2026-10,1200095,101070134,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,2304
-2026-10,1200095,101070135,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,144
-2026-10,1200095,101070156,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,819
-2026-10,1200095,101070156,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1260
+2026-10,1200095,101070134,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,672
+2026-10,1200095,101070134,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,3168
+2026-10,1200095,101070135,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,72
+2026-10,1200095,101070135,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,72
+2026-10,1200095,101070156,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,693
+2026-10,1200095,101070156,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1386
 2026-10,1200095,101070162,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,189
 2026-10,1200095,101070162,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,63
-2026-10,1200095,101070168,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,882
-2026-10,1200095,101070168,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,882
-2026-10,1200095,101070192,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,576
-2026-10,1200095,101070192,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,960
+2026-10,1200095,101070168,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,630
+2026-10,1200095,101070168,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1134
+2026-10,1200095,101070192,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,384
+2026-10,1200095,101070192,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1152
 2026-10,1200100,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,14496
 2026-10,1200100,101004098,National,National Club,Earnest Sinambela,출고 미확정,3840
 2026-10,1200100,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,5850
@@ -223,7 +230,7 @@
 2026-10,1200148,101004174,Asian,East,David Li,10월 출고 확정,180
 2026-10,1200148,101004183,Asian,East,David Li,10월 출고 확정,180
 2026-10,1200148,101070112,Asian,East,David Li,10월 출고 확정,486
-2026-10,1200148,101070134,Asian,East,David Li,출고 미확정,6480
+2026-10,1200148,101070134,Asian,East,David Li,10월 출고 확정,6480
 2026-10,1200148,101070135,Asian,East,David Li,10월 출고 확정,162
 2026-10,1200148,101070153,Asian,East,David Li,10월 출고 확정,72
 2026-10,1200148,101070158,Asian,East,David Li,10월 출고 확정,72
@@ -249,7 +256,7 @@
 2026-10,1200160,101070162,Mainstream,Main Retail,Daniel Urenda,출고 미확정,504
 2026-10,1200160,101070168,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,693
 2026-10,1200160,101070168,Mainstream,Main Retail,Daniel Urenda,출고 미확정,819
-2026-10,1200180,101002715,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,360
+2026-10,1200180,101070108,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,360
 2026-10,1200180,101070153,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,432
 2026-10,1200180,101070154,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,576
 2026-10,1200180,101070156,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,864
@@ -467,8 +474,7 @@
 2026-10,1200256,101070192,Mainstream,Main Retail,Nicholas Park,출고 미확정,480
 2026-10,1200265,101002188,Mainstream,Main Wholesale,Julia Kim,출고 미확정,495
 2026-10,1200265,101002402,Mainstream,Main Wholesale,Julia Kim,출고 미확정,207
-2026-10,1200265,101002715,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,440
-2026-10,1200265,101002715,Mainstream,Main Wholesale,Julia Kim,출고 미확정,880
+2026-10,1200265,101002715,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,420
 2026-10,1200265,101002717,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,80
 2026-10,1200265,101003015,Mainstream,Main Wholesale,Julia Kim,출고 미확정,16
 2026-10,1200265,101003241,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,150
@@ -480,6 +486,8 @@
 2026-10,1200265,101004261,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,72
 2026-10,1200265,101004261,Mainstream,Main Wholesale,Julia Kim,출고 미확정,162
 2026-10,1200265,101070040,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,12
+2026-10,1200265,101070108,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,20
+2026-10,1200265,101070108,Mainstream,Main Wholesale,Julia Kim,출고 미확정,880
 2026-10,1200265,101070112,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,162
 2026-10,1200265,101070134,Mainstream,Main Wholesale,Julia Kim,출고 미확정,936
 2026-10,1200265,101070135,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,5
@@ -495,6 +503,16 @@
 2026-10,1200265,101070165,Mainstream,Main Wholesale,Julia Kim,출고 미확정,567
 2026-10,1200265,101070168,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,864
 2026-10,1200265,101070168,Mainstream,Main Wholesale,Julia Kim,출고 미확정,846
+2026-10,1200288,101002612,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,900
+2026-10,1200288,101003241,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,360
+2026-10,1200288,101004257,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,384
+2026-10,1200288,101070153,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,720
+2026-10,1200288,101070154,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,288
+2026-10,1200288,101070156,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,1152
+2026-10,1200288,101070158,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,864
+2026-10,1200288,101070162,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,2304
+2026-10,1200288,101070165,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,864
+2026-10,1200288,101070168,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,1584
 2026-10,1200363,101002381,Mainstream,Main Wholesale,Julia Kim,출고 미확정,150
 2026-10,1200363,101002612,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,300
 2026-10,1200363,101002612,Mainstream,Main Wholesale,Julia Kim,출고 미확정,1500
@@ -539,6 +557,17 @@
 2026-10,1200419,101070156,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,504
 2026-10,1200419,101070162,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,1134
 2026-10,1200419,101070165,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,315
+2026-10,1200441,101002381,Mainstream,Main Retail,Nicholas Park,출고 미확정,150
+2026-10,1200441,101002612,Mainstream,Main Retail,Nicholas Park,출고 미확정,150
+2026-10,1200441,101003347,Mainstream,Main Retail,Nicholas Park,출고 미확정,72
+2026-10,1200441,101070105,Mainstream,Main Retail,Nicholas Park,출고 미확정,216
+2026-10,1200441,101070108,Mainstream,Main Retail,Nicholas Park,출고 미확정,360
+2026-10,1200441,101070112,Mainstream,Main Retail,Nicholas Park,출고 미확정,324
+2026-10,1200441,101070153,Mainstream,Main Retail,Nicholas Park,출고 미확정,144
+2026-10,1200441,101070154,Mainstream,Main Retail,Nicholas Park,출고 미확정,63
+2026-10,1200441,101070162,Mainstream,Main Retail,Nicholas Park,출고 미확정,144
+2026-10,1200441,101070165,Mainstream,Main Retail,Nicholas Park,출고 미확정,144
+2026-10,1200441,101070168,Mainstream,Main Retail,Nicholas Park,출고 미확정,144
 2026-10,1200460,101003347,Asian,West,Youngjin Yoo,출고 미확정,1296
 2026-10,1200460,101004141,Asian,West,Youngjin Yoo,출고 미확정,648
 2026-10,1200460,101070134,Asian,West,Youngjin Yoo,출고 미확정,2376
@@ -569,22 +598,22 @@
 2026-10,1200518,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,300
 2026-10,1200518,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,41888
 2026-10,1200518,101070106,National,National Club,Earnest Sinambela,출고 미확정,15840
-2026-10,1200521,101004174,Mainstream,Main Retail,Nicholas Park,출고 미확정,165
-2026-10,1200521,101070153,Mainstream,Main Retail,Nicholas Park,출고 미확정,441
-2026-10,1200521,101070154,Mainstream,Main Retail,Nicholas Park,출고 미확정,189
-2026-10,1200521,101070156,Mainstream,Main Retail,Nicholas Park,출고 미확정,189
-2026-10,1200521,101070163,Mainstream,Main Retail,Nicholas Park,출고 미확정,360
-2026-10,1200521,101070166,Mainstream,Main Retail,Nicholas Park,출고 미확정,810
+2026-10,1200521,101004174,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,165
+2026-10,1200521,101070153,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,441
+2026-10,1200521,101070154,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,189
+2026-10,1200521,101070156,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,189
+2026-10,1200521,101070163,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,360
+2026-10,1200521,101070166,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,810
 2026-10,1200548,101004174,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,2310
-2026-10,1200548,101004174,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1485
+2026-10,1200548,101004174,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,2145
 2026-10,1200548,101070105,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,8928
-2026-10,1200548,101070105,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,4320
+2026-10,1200548,101070105,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,7104
 2026-10,1200548,101070112,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,504
 2026-10,1200548,101070112,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,72
 2026-10,1200548,101070156,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,3465
-2026-10,1200548,101070156,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1512
+2026-10,1200548,101070156,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,1953
 2026-10,1200548,101070162,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,4473
-2026-10,1200548,101070162,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,2583
+2026-10,1200548,101070162,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,3843
 2026-10,1200654,101002622,National,National Club,Earnest Sinambela,10월 출고 확정,160
 2026-10,1200654,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,16320
 2026-10,1200654,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,90
@@ -605,39 +634,42 @@
 2026-10,1200657,101070163,National,National Club,Earnest Sinambela,출고 미확정,180
 2026-10,1200657,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,45
 2026-10,1200657,101070166,National,National Club,Earnest Sinambela,출고 미확정,45
-2026-10,1200659,101002622,National,National Club,Earnest Sinambela,10월 출고 확정,22240
-2026-10,1200659,101002622,National,National Club,Earnest Sinambela,출고 미확정,6960
-2026-10,1200659,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,13824
-2026-10,1200659,101004098,National,National Club,Earnest Sinambela,출고 미확정,16416
-2026-10,1200659,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,270
-2026-10,1200659,101004125,National,National Club,Earnest Sinambela,출고 미확정,90
-2026-10,1200659,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,10200
-2026-10,1200659,101007351,National,National Club,Earnest Sinambela,출고 미확정,9675
-2026-10,1200659,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,34320
-2026-10,1200659,101070106,National,National Club,Earnest Sinambela,출고 미확정,7832
-2026-10,1200659,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,225
-2026-10,1200659,101070163,National,National Club,Earnest Sinambela,출고 미확정,45
-2026-10,1200659,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,180
-2026-10,1200659,101070166,National,National Club,Earnest Sinambela,출고 미확정,45
+2026-10,1200659,101002622,National,National Club,Earnest Sinambela,10월 출고 확정,21760
+2026-10,1200659,101002622,National,National Club,Earnest Sinambela,출고 미확정,7440
+2026-10,1200659,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,11616
+2026-10,1200659,101004098,National,National Club,Earnest Sinambela,출고 미확정,18624
+2026-10,1200659,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,225
+2026-10,1200659,101004125,National,National Club,Earnest Sinambela,출고 미확정,135
+2026-10,1200659,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,8025
+2026-10,1200659,101007351,National,National Club,Earnest Sinambela,출고 미확정,11850
+2026-10,1200659,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,34144
+2026-10,1200659,101070106,National,National Club,Earnest Sinambela,출고 미확정,8008
+2026-10,1200659,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,180
+2026-10,1200659,101070163,National,National Club,Earnest Sinambela,출고 미확정,90
+2026-10,1200659,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,135
+2026-10,1200659,101070166,National,National Club,Earnest Sinambela,출고 미확정,90
 2026-10,1200671,101002622,National,National Club,Earnest Sinambela,10월 출고 확정,320
 2026-10,1200671,101002622,National,National Club,Earnest Sinambela,출고 미확정,240
-2026-10,1200671,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,10464
-2026-10,1200671,101004098,National,National Club,Earnest Sinambela,출고 미확정,3264
-2026-10,1200671,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,315
-2026-10,1200671,101004125,National,National Club,Earnest Sinambela,출고 미확정,315
-2026-10,1200671,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,3375
-2026-10,1200671,101007351,National,National Club,Earnest Sinambela,출고 미확정,1350
-2026-10,1200671,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,26752
-2026-10,1200671,101070106,National,National Club,Earnest Sinambela,출고 미확정,4400
+2026-10,1200671,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,12480
+2026-10,1200671,101004098,National,National Club,Earnest Sinambela,출고 미확정,1248
+2026-10,1200671,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,405
+2026-10,1200671,101004125,National,National Club,Earnest Sinambela,출고 미확정,225
+2026-10,1200671,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,3825
+2026-10,1200671,101007351,National,National Club,Earnest Sinambela,출고 미확정,900
+2026-10,1200671,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,29480
+2026-10,1200671,101070106,National,National Club,Earnest Sinambela,출고 미확정,1672
 2026-10,1200671,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,225
 2026-10,1200671,101070163,National,National Club,Earnest Sinambela,출고 미확정,225
 2026-10,1200671,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,45
 2026-10,1200671,101070166,National,National Club,Earnest Sinambela,출고 미확정,135
 2026-10,1200682,101002622,National,National Club,Earnest Sinambela,10월 출고 확정,240
 2026-10,1200682,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,2496
+2026-10,1200682,101004098,National,National Club,Earnest Sinambela,출고 미확정,3072
 2026-10,1200682,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,450
 2026-10,1200682,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,2550
+2026-10,1200682,101007351,National,National Club,Earnest Sinambela,출고 미확정,1500
 2026-10,1200682,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,50072
+2026-10,1200682,101070106,National,National Club,Earnest Sinambela,출고 미확정,704
 2026-10,1200682,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,225
 2026-10,1200682,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,135
 2026-10,1200695,101002381,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,125
@@ -674,18 +706,18 @@
 2026-10,1200698,102002755,Asian,West,Youngjin Yoo,출고 미확정,192
 2026-10,1200698,102002772,Asian,West,Youngjin Yoo,출고 미확정,270
 2026-10,1200698,102002773,Asian,West,Youngjin Yoo,출고 미확정,270
-2026-10,1200711,101002622,National,National Club,Earnest Sinambela,10월 출고 확정,240
-2026-10,1200711,101002622,National,National Club,Earnest Sinambela,출고 미확정,560
-2026-10,1200711,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,10848
-2026-10,1200711,101004098,National,National Club,Earnest Sinambela,출고 미확정,14880
-2026-10,1200711,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,450
-2026-10,1200711,101004125,National,National Club,Earnest Sinambela,출고 미확정,405
-2026-10,1200711,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,2850
-2026-10,1200711,101007351,National,National Club,Earnest Sinambela,출고 미확정,4425
-2026-10,1200711,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,24816
-2026-10,1200711,101070106,National,National Club,Earnest Sinambela,출고 미확정,10296
-2026-10,1200711,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,3600
-2026-10,1200711,101070163,National,National Club,Earnest Sinambela,출고 미확정,8190
+2026-10,1200711,101002622,National,National Club,Earnest Sinambela,10월 출고 확정,320
+2026-10,1200711,101002622,National,National Club,Earnest Sinambela,출고 미확정,480
+2026-10,1200711,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,14976
+2026-10,1200711,101004098,National,National Club,Earnest Sinambela,출고 미확정,13152
+2026-10,1200711,101004125,National,National Club,Earnest Sinambela,10월 출고 확정,495
+2026-10,1200711,101004125,National,National Club,Earnest Sinambela,출고 미확정,360
+2026-10,1200711,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,3150
+2026-10,1200711,101007351,National,National Club,Earnest Sinambela,출고 미확정,4125
+2026-10,1200711,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,24288
+2026-10,1200711,101070106,National,National Club,Earnest Sinambela,출고 미확정,8272
+2026-10,1200711,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,4185
+2026-10,1200711,101070163,National,National Club,Earnest Sinambela,출고 미확정,7605
 2026-10,1200711,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,630
 2026-10,1200711,101070166,National,National Club,Earnest Sinambela,출고 미확정,495
 2026-10,1200718,101002612,Asian,East,David Li,10월 출고 확정,2250
@@ -700,8 +732,8 @@
 2026-10,1200718,101070112,Asian,East,David Li,10월 출고 확정,5103
 2026-10,1200718,101070115,Asian,East,David Li,10월 출고 확정,108
 2026-10,1200718,101070118,Asian,East,David Li,10월 출고 확정,216
-2026-10,1200718,101070134,Asian,East,David Li,10월 출고 확정,10476
-2026-10,1200718,101070134,Asian,East,David Li,출고 미확정,19440
+2026-10,1200718,101070134,Asian,East,David Li,10월 출고 확정,16956
+2026-10,1200718,101070134,Asian,East,David Li,출고 미확정,12960
 2026-10,1200718,101070135,Asian,East,David Li,10월 출고 확정,1215
 2026-10,1200718,101070153,Asian,East,David Li,10월 출고 확정,72
 2026-10,1200718,101070154,Asian,East,David Li,10월 출고 확정,360
@@ -737,14 +769,16 @@
 2026-10,1200719,101070168,Asian,East,David Li,10월 출고 확정,576
 2026-10,1200719,101070168,Asian,East,David Li,출고 미확정,720
 2026-10,1200719,101070244,Asian,East,David Li,10월 출고 확정,486
+2026-10,1200720,101002640,Asian,East,David Li,출고 미확정,72
 2026-10,1200720,101002715,Asian,East,David Li,10월 출고 확정,540
 2026-10,1200720,101003241,Asian,East,David Li,10월 출고 확정,900
 2026-10,1200720,101003347,Asian,East,David Li,10월 출고 확정,648
+2026-10,1200720,101003347,Asian,East,David Li,출고 미확정,216
 2026-10,1200720,101003359,Asian,East,David Li,10월 출고 확정,360
 2026-10,1200720,101004141,Asian,East,David Li,10월 출고 확정,810
 2026-10,1200720,101004229,Asian,East,David Li,10월 출고 확정,81
 2026-10,1200720,101070112,Asian,East,David Li,10월 출고 확정,729
-2026-10,1200720,101070134,Asian,East,David Li,출고 미확정,6480
+2026-10,1200720,101070134,Asian,East,David Li,출고 미확정,6048
 2026-10,1200720,101070135,Asian,East,David Li,10월 출고 확정,162
 2026-10,1200720,101070156,Asian,East,David Li,10월 출고 확정,72
 2026-10,1200720,101070162,Asian,East,David Li,10월 출고 확정,504
@@ -755,8 +789,8 @@
 2026-10,1200721,101003457,Mexico,Mexico,Galia Grano,10월 출고 확정,360
 2026-10,1200742,101002612,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,600
 2026-10,1200742,101002612,Mainstream,Main Retail,Nicholas Park,출고 미확정,2400
-2026-10,1200742,101002715,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,360
-2026-10,1200742,101002715,Mainstream,Main Retail,Nicholas Park,출고 미확정,1440
+2026-10,1200742,101070108,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,360
+2026-10,1200742,101070108,Mainstream,Main Retail,Nicholas Park,출고 미확정,1440
 2026-10,1200742,101070153,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,288
 2026-10,1200742,101070153,Mainstream,Main Retail,Nicholas Park,출고 미확정,1152
 2026-10,1200742,101070154,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,288
@@ -776,17 +810,14 @@
 2026-10,1200761,101070162,Asian,West,Songho Choi,10월 출고 확정,648
 2026-10,1200761,101070165,Asian,West,Songho Choi,10월 출고 확정,1512
 2026-10,1200761,101070168,Asian,West,Songho Choi,10월 출고 확정,360
-2026-10,1200763,101001911,National,National Retail,Minhoon Chang,출고 미확정,300
 2026-10,1200763,101002381,National,National Retail,Minhoon Chang,10월 출고 확정,704
 2026-10,1200763,101002381,National,National Retail,Minhoon Chang,출고 미확정,30
-2026-10,1200763,101002402,National,National Retail,Minhoon Chang,출고 미확정,1044
 2026-10,1200763,101002640,National,National Retail,Minhoon Chang,10월 출고 확정,2017
 2026-10,1200763,101002640,National,National Retail,Minhoon Chang,출고 미확정,531
 2026-10,1200763,101002844,National,National Retail,Minhoon Chang,10월 출고 확정,999
 2026-10,1200763,101002844,National,National Retail,Minhoon Chang,출고 미확정,144
 2026-10,1200763,101002859,National,National Retail,Minhoon Chang,10월 출고 확정,696
 2026-10,1200763,101002859,National,National Retail,Minhoon Chang,출고 미확정,11
-2026-10,1200763,101003346,National,National Retail,Minhoon Chang,출고 미확정,192
 2026-10,1200763,101003347,National,National Retail,Minhoon Chang,10월 출고 확정,3840
 2026-10,1200763,101003347,National,National Retail,Minhoon Chang,출고 미확정,672
 2026-10,1200763,101003359,National,National Retail,Minhoon Chang,10월 출고 확정,1
@@ -798,12 +829,9 @@
 2026-10,1200763,101004233,National,National Retail,Minhoon Chang,출고 미확정,1296
 2026-10,1200763,101004257,National,National Retail,Minhoon Chang,10월 출고 확정,9483
 2026-10,1200763,101004257,National,National Retail,Minhoon Chang,출고 미확정,2496
-2026-10,1200763,101005683,National,National Retail,Minhoon Chang,출고 미확정,28
 2026-10,1200763,101005690,National,National Retail,Minhoon Chang,10월 출고 확정,2247
 2026-10,1200763,101005690,National,National Retail,Minhoon Chang,출고 미확정,576
 2026-10,1200763,101006320,National,National Retail,Minhoon Chang,10월 출고 확정,29
-2026-10,1200763,101006321,National,National Retail,Minhoon Chang,출고 미확정,10
-2026-10,1200763,101007028,National,National Retail,Minhoon Chang,출고 미확정,266
 2026-10,1200763,101007310,National,National Retail,Minhoon Chang,출고 미확정,8
 2026-10,1200763,101007594,National,National Retail,Minhoon Chang,10월 출고 확정,326
 2026-10,1200763,101007596,National,National Retail,Minhoon Chang,10월 출고 확정,324
@@ -851,14 +879,12 @@
 2026-10,1200763,102002433,National,National Retail,Minhoon Chang,10월 출고 확정,721
 2026-10,1200763,102002433,National,National Retail,Minhoon Chang,출고 미확정,156
 2026-10,1200763,102002451,National,National Retail,Minhoon Chang,출고 미확정,6
-2026-10,1200763,102002453,National,National Retail,Minhoon Chang,출고 미확정,6
+2026-10,1200763,102002453,National,National Retail,Minhoon Chang,출고 미확정,5
 2026-10,1200763,102002642,National,National Retail,Minhoon Chang,10월 출고 확정,22
-2026-10,1200763,102002642,National,National Retail,Minhoon Chang,출고 미확정,44
 2026-10,1200763,102002643,National,National Retail,Minhoon Chang,10월 출고 확정,342
 2026-10,1200763,102002643,National,National Retail,Minhoon Chang,출고 미확정,55
 2026-10,1200763,102002666,National,National Retail,Minhoon Chang,출고 미확정,8
 2026-10,1200763,102002785,National,National Retail,Minhoon Chang,10월 출고 확정,377
-2026-10,1200763,901002859,National,National Retail,Minhoon Chang,출고 미확정,8
 2026-10,1200765,101070156,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,1323
 2026-10,1200765,101070158,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,441
 2026-10,1200765,101070162,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,1701
@@ -886,16 +912,15 @@
 2026-10,1200771,101070162,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,252
 2026-10,1200771,101070165,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,126
 2026-10,1200771,101070168,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,189
-2026-10,1200781,101002188,Mainstream,Main Wholesale,Julia Kim,출고 미확정,9
 2026-10,1200781,101002402,Mainstream,Main Wholesale,Julia Kim,출고 미확정,9
 2026-10,1200781,101002715,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,540
-2026-10,1200781,101002715,Mainstream,Main Wholesale,Julia Kim,출고 미확정,1840
 2026-10,1200781,101002717,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,40
 2026-10,1200781,101002717,Mainstream,Main Wholesale,Julia Kim,출고 미확정,320
 2026-10,1200781,101003241,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,60
 2026-10,1200781,101004174,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,45
 2026-10,1200781,101004261,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,216
 2026-10,1200781,101004261,Mainstream,Main Wholesale,Julia Kim,출고 미확정,216
+2026-10,1200781,101070108,Mainstream,Main Wholesale,Julia Kim,출고 미확정,1840
 2026-10,1200781,101070153,Mainstream,Main Wholesale,Julia Kim,출고 미확정,9
 2026-10,1200781,101070154,Mainstream,Main Wholesale,Julia Kim,출고 미확정,54
 2026-10,1200781,101070162,Mainstream,Main Wholesale,Julia Kim,10월 출고 확정,126
@@ -931,21 +956,22 @@
 2026-10,1200786,101070168,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,1323
 2026-10,1200793,101002612,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,285
 2026-10,1200793,101002859,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,360
-2026-10,1200793,101003241,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,165
+2026-10,1200793,101003241,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,330
 2026-10,1200793,101003241,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,150
-2026-10,1200793,101004174,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,495
+2026-10,1200793,101004174,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,825
 2026-10,1200793,101004174,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,56
-2026-10,1200793,101070153,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,63
+2026-10,1200793,101070153,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,126
 2026-10,1200793,101070154,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,693
-2026-10,1200793,101070154,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,252
-2026-10,1200793,101070156,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,225
-2026-10,1200793,101070158,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,252
-2026-10,1200793,101070158,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,63
-2026-10,1200793,101070162,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,1134
-2026-10,1200793,101070162,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,63
+2026-10,1200793,101070154,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,441
+2026-10,1200793,101070156,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,99
+2026-10,1200793,101070156,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,126
+2026-10,1200793,101070158,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,189
+2026-10,1200793,101070158,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,189
+2026-10,1200793,101070162,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,1197
+2026-10,1200793,101070162,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,189
 2026-10,1200793,101070165,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,144
-2026-10,1200793,101070168,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,864
-2026-10,1200793,101070168,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,126
+2026-10,1200793,101070168,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,990
+2026-10,1200793,101070168,Mainstream,Main Wholesale,Isidro Alvarez,출고 미확정,378
 2026-10,1200826,101004257,Asian,East,Juyoung Park,10월 출고 확정,100
 2026-10,1200826,101070134,Asian,East,Juyoung Park,10월 출고 확정,50
 2026-10,1200841,101002381,National,National Retail,Minhoon Chang,10월 출고 확정,1800
@@ -992,15 +1018,15 @@
 2026-10,1200841,101070215,National,National Retail,Minhoon Chang,출고 미확정,192
 2026-10,1200841,101070216,National,National Retail,Minhoon Chang,출고 미확정,192
 2026-10,1200841,101070217,National,National Retail,Minhoon Chang,출고 미확정,192
-2026-10,1200915,101003241,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,271
-2026-10,1200915,101004174,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,330
-2026-10,1200915,101004257,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,96
-2026-10,1200915,101070153,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,315
-2026-10,1200915,101070156,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,315
-2026-10,1200915,101070158,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,189
-2026-10,1200915,101070162,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,315
-2026-10,1200915,101070165,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,252
-2026-10,1200915,101070168,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,504
+2026-10,1200915,101003241,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,271
+2026-10,1200915,101004174,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,330
+2026-10,1200915,101004257,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,96
+2026-10,1200915,101070153,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,315
+2026-10,1200915,101070156,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,315
+2026-10,1200915,101070158,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,189
+2026-10,1200915,101070162,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,315
+2026-10,1200915,101070165,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,252
+2026-10,1200915,101070168,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,504
 2026-10,1200927,101003133,Mexico,Mexico,Galia Grano,출고 미확정,6840
 2026-10,1200927,101003457,Mexico,Mexico,Galia Grano,출고 미확정,360
 2026-10,1200927,101004233,Mexico,Mexico,Galia Grano,출고 미확정,380
@@ -1017,8 +1043,8 @@
 2026-10,1200973,101070162,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,126
 2026-10,1200973,101070165,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,126
 2026-10,1200973,101070168,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,189
-2026-10,1200984,101070105,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,5184
-2026-10,1200984,101070105,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,6048
+2026-10,1200984,101070105,Mainstream,Main Retail,Ho Sik Shin,10월 출고 확정,6912
+2026-10,1200984,101070105,Mainstream,Main Retail,Ho Sik Shin,출고 미확정,4320
 2026-10,1200985,101002622,National,National Club,Earnest Sinambela,10월 출고 확정,1840
 2026-10,1200985,101004098,National,National Club,Earnest Sinambela,10월 출고 확정,2208
 2026-10,1200985,101004098,National,National Club,Earnest Sinambela,출고 미확정,192
@@ -1028,14 +1054,15 @@
 2026-10,1200985,101070106,National,National Club,Earnest Sinambela,10월 출고 확정,5632
 2026-10,1200985,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,2205
 2026-10,1200985,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,765
-2026-10,1200989,101004196,National,National Club,Earnest Sinambela,10월 출고 확정,6912
-2026-10,1200989,101004196,National,National Club,Earnest Sinambela,출고 미확정,2688
-2026-10,1200989,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,3900
-2026-10,1200989,101007351,National,National Club,Earnest Sinambela,출고 미확정,1950
-2026-10,1200989,101070149,National,National Club,Earnest Sinambela,10월 출고 확정,1536
-2026-10,1200989,101070163,National,National Club,Earnest Sinambela,출고 미확정,1170
-2026-10,1200989,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,9900
-2026-10,1200989,101070166,National,National Club,Earnest Sinambela,출고 미확정,2070
+2026-10,1200989,101004196,National,National Club,Earnest Sinambela,10월 출고 확정,9600
+2026-10,1200989,101007351,National,National Club,Earnest Sinambela,10월 출고 확정,4500
+2026-10,1200989,101007351,National,National Club,Earnest Sinambela,출고 미확정,1350
+2026-10,1200989,101070149,National,National Club,Earnest Sinambela,10월 출고 확정,1344
+2026-10,1200989,101070149,National,National Club,Earnest Sinambela,출고 미확정,192
+2026-10,1200989,101070163,National,National Club,Earnest Sinambela,10월 출고 확정,990
+2026-10,1200989,101070163,National,National Club,Earnest Sinambela,출고 미확정,180
+2026-10,1200989,101070166,National,National Club,Earnest Sinambela,10월 출고 확정,10170
+2026-10,1200989,101070166,National,National Club,Earnest Sinambela,출고 미확정,1800
 2026-10,1200996,101070162,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,63
 2026-10,1200996,101070165,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,63
 2026-10,1201002,101002715,Mexico,Mexico,Galia Grano,10월 출고 확정,1800
@@ -1044,6 +1071,19 @@
 2026-10,1201002,101070162,Mexico,Mexico,Galia Grano,10월 출고 확정,360
 2026-10,1201002,101070165,Mexico,Mexico,Galia Grano,10월 출고 확정,72
 2026-10,1201002,101070168,Mexico,Mexico,Galia Grano,10월 출고 확정,1800
+2026-10,1201012,101070115,Asian,East,Jung Geun Lee,출고 미확정,216
+2026-10,1201012,101070116,Asian,East,Jung Geun Lee,출고 미확정,216
+2026-10,1201012,101070117,Asian,East,Jung Geun Lee,출고 미확정,216
+2026-10,1201012,101070118,Asian,East,Jung Geun Lee,출고 미확정,216
+2026-10,1201012,101070134,Asian,East,Jung Geun Lee,출고 미확정,3240
+2026-10,1201012,101070153,Asian,East,Jung Geun Lee,출고 미확정,144
+2026-10,1201012,101070154,Asian,East,Jung Geun Lee,출고 미확정,144
+2026-10,1201012,101070156,Asian,East,Jung Geun Lee,출고 미확정,288
+2026-10,1201012,101070158,Asian,East,Jung Geun Lee,출고 미확정,144
+2026-10,1201012,101070162,Asian,East,Jung Geun Lee,출고 미확정,1440
+2026-10,1201012,101070165,Asian,East,Jung Geun Lee,출고 미확정,432
+2026-10,1201012,101070168,Asian,East,Jung Geun Lee,출고 미확정,2736
+2026-10,1201012,101070244,Asian,East,Jung Geun Lee,출고 미확정,648
 2026-10,1201026,101002716,Mexico,Mexico,Galia Grano,출고 미확정,3402
 2026-10,1201026,101002717,Mexico,Mexico,Galia Grano,출고 미확정,360
 2026-10,1201026,101003133,Mexico,Mexico,Galia Grano,출고 미확정,16200
@@ -1088,12 +1128,12 @@
 2026-10,1201035,101070168,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,4095
 2026-10,1201035,101070168,Mainstream,Main Wholesale,Dagyeong Jeong,출고 미확정,2772
 2026-10,1201043,101002612,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,150
-2026-10,1201043,101002715,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,480
 2026-10,1201043,101002717,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,160
 2026-10,1201043,101002859,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,165
 2026-10,1201043,101003241,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,330
 2026-10,1201043,101004174,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,165
 2026-10,1201043,101004261,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,72
+2026-10,1201043,101070108,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,480
 2026-10,1201043,101070134,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,192
 2026-10,1201043,101070135,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,72
 2026-10,1201043,101070153,Mainstream,Main Wholesale,Isidro Alvarez,10월 출고 확정,63
@@ -1162,25 +1202,25 @@
 2026-10,1201072,102002773,Asian,West,Youngjin Yoo,10월 출고 확정,90
 2026-10,1201072,102002774,Asian,West,Youngjin Yoo,10월 출고 확정,90
 2026-10,1201072,102002775,Asian,West,Youngjin Yoo,10월 출고 확정,90
-2026-10,1201073,101002612,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,300
-2026-10,1201073,101002715,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,160
-2026-10,1201073,101002717,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,54
-2026-10,1201073,101002859,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,660
-2026-10,1201073,101003241,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,330
-2026-10,1201073,101004141,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,72
-2026-10,1201073,101004233,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,384
-2026-10,1201073,101004257,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,288
-2026-10,1201073,101070040,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,34
-2026-10,1201073,101070105,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,300
-2026-10,1201073,101070112,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,288
-2026-10,1201073,101070153,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,189
-2026-10,1201073,101070154,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,198
-2026-10,1201073,101070156,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,189
-2026-10,1201073,101070158,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,63
-2026-10,1201073,101070162,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,504
-2026-10,1201073,101070165,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,144
-2026-10,1201073,101070168,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,378
-2026-10,1201073,101070244,Mainstream,Main Retail,Daniel Urenda,10월 출고 확정,216
+2026-10,1201073,101002612,Mainstream,Main Retail,Daniel Urenda,출고 미확정,300
+2026-10,1201073,101002715,Mainstream,Main Retail,Daniel Urenda,출고 미확정,160
+2026-10,1201073,101002717,Mainstream,Main Retail,Daniel Urenda,출고 미확정,54
+2026-10,1201073,101002859,Mainstream,Main Retail,Daniel Urenda,출고 미확정,660
+2026-10,1201073,101003241,Mainstream,Main Retail,Daniel Urenda,출고 미확정,330
+2026-10,1201073,101004141,Mainstream,Main Retail,Daniel Urenda,출고 미확정,72
+2026-10,1201073,101004233,Mainstream,Main Retail,Daniel Urenda,출고 미확정,384
+2026-10,1201073,101004257,Mainstream,Main Retail,Daniel Urenda,출고 미확정,288
+2026-10,1201073,101070040,Mainstream,Main Retail,Daniel Urenda,출고 미확정,34
+2026-10,1201073,101070105,Mainstream,Main Retail,Daniel Urenda,출고 미확정,300
+2026-10,1201073,101070112,Mainstream,Main Retail,Daniel Urenda,출고 미확정,288
+2026-10,1201073,101070153,Mainstream,Main Retail,Daniel Urenda,출고 미확정,189
+2026-10,1201073,101070154,Mainstream,Main Retail,Daniel Urenda,출고 미확정,198
+2026-10,1201073,101070156,Mainstream,Main Retail,Daniel Urenda,출고 미확정,189
+2026-10,1201073,101070158,Mainstream,Main Retail,Daniel Urenda,출고 미확정,63
+2026-10,1201073,101070162,Mainstream,Main Retail,Daniel Urenda,출고 미확정,504
+2026-10,1201073,101070165,Mainstream,Main Retail,Daniel Urenda,출고 미확정,144
+2026-10,1201073,101070168,Mainstream,Main Retail,Daniel Urenda,출고 미확정,378
+2026-10,1201073,101070244,Mainstream,Main Retail,Daniel Urenda,출고 미확정,216
 2026-10,1201076,101002188,Asian,East,Jung Geun Lee,10월 출고 확정,72
 2026-10,1201076,101002859,Asian,East,Jung Geun Lee,10월 출고 확정,90
 2026-10,1201076,101003241,Asian,East,Jung Geun Lee,10월 출고 확정,180
@@ -1209,22 +1249,20 @@
 2026-10,1205009,101004261,Mainstream,Main Wholesale,Woongsik Eom,10월 출고 확정,72
 2026-10,1205021,101002859,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,360
 2026-10,1205021,101004174,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,1080
-2026-10,1205026,101002715,National,Dollar & New,Catherine Yang,10월 출고 확정,1800
-2026-10,1205026,101002715,National,Dollar & New,Catherine Yang,출고 미확정,720
-2026-10,1205026,101002717,National,Dollar & New,Catherine Yang,10월 출고 확정,360
-2026-10,1205026,101002717,National,Dollar & New,Catherine Yang,출고 미확정,360
+2026-10,1205026,101002715,National,Dollar & New,Catherine Yang,10월 출고 확정,2520
+2026-10,1205026,101002717,National,Dollar & New,Catherine Yang,10월 출고 확정,720
 2026-10,1205026,101003241,National,Dollar & New,Catherine Yang,10월 출고 확정,7920
 2026-10,1205026,101003241,National,Dollar & New,Catherine Yang,출고 미확정,1440
-2026-10,1205026,101070108,National,Dollar & New,Catherine Yang,10월 출고 확정,4320
-2026-10,1205026,101070108,National,Dollar & New,Catherine Yang,출고 미확정,720
-2026-10,1205026,101070152,National,Dollar & New,Catherine Yang,10월 출고 확정,7488
-2026-10,1205026,101070152,National,Dollar & New,Catherine Yang,출고 미확정,1440
-2026-10,1205026,101070155,National,Dollar & New,Catherine Yang,10월 출고 확정,6336
-2026-10,1205026,101070155,National,Dollar & New,Catherine Yang,출고 미확정,288
-2026-10,1205026,101070157,National,Dollar & New,Catherine Yang,10월 출고 확정,4032
-2026-10,1205026,101070157,National,Dollar & New,Catherine Yang,출고 미확정,2304
-2026-10,1205026,101070161,National,Dollar & New,Catherine Yang,10월 출고 확정,7488
-2026-10,1205026,101070161,National,Dollar & New,Catherine Yang,출고 미확정,864
+2026-10,1205026,101070108,National,Dollar & New,Catherine Yang,10월 출고 확정,3600
+2026-10,1205026,101070108,National,Dollar & New,Catherine Yang,출고 미확정,1440
+2026-10,1205026,101070152,National,Dollar & New,Catherine Yang,10월 출고 확정,6336
+2026-10,1205026,101070152,National,Dollar & New,Catherine Yang,출고 미확정,2592
+2026-10,1205026,101070155,National,Dollar & New,Catherine Yang,10월 출고 확정,5472
+2026-10,1205026,101070155,National,Dollar & New,Catherine Yang,출고 미확정,1152
+2026-10,1205026,101070157,National,Dollar & New,Catherine Yang,10월 출고 확정,4320
+2026-10,1205026,101070157,National,Dollar & New,Catherine Yang,출고 미확정,2016
+2026-10,1205026,101070161,National,Dollar & New,Catherine Yang,10월 출고 확정,6912
+2026-10,1205026,101070161,National,Dollar & New,Catherine Yang,출고 미확정,1440
 2026-10,1205033,101002402,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,18
 2026-10,1205033,101003241,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,10
 2026-10,1205033,101003347,Mainstream,Main Wholesale,Dagyeong Jeong,10월 출고 확정,48
@@ -1260,7 +1298,7 @@
 2026-10,1205046,101003360,Asian,West,Kwang Hyuk Kim,출고 미확정,180
 2026-10,1205046,101004141,Asian,West,Kwang Hyuk Kim,10월 출고 확정,1620
 2026-10,1205046,101004141,Asian,West,Kwang Hyuk Kim,출고 미확정,891
-2026-10,1205046,101004224,Asian,West,Kwang Hyuk Kim,출고 미확정,6480
+2026-10,1205046,101004224,Asian,West,Kwang Hyuk Kim,10월 출고 확정,6480
 2026-10,1205046,101004257,Asian,West,Kwang Hyuk Kim,10월 출고 확정,96
 2026-10,1205046,101004261,Asian,West,Kwang Hyuk Kim,10월 출고 확정,81
 2026-10,1205046,101004261,Asian,West,Kwang Hyuk Kim,출고 미확정,162
@@ -1284,12 +1322,15 @@
 2026-10,1205046,101070213,Asian,West,Kwang Hyuk Kim,출고 미확정,192
 2026-10,1205046,101070244,Asian,West,Kwang Hyuk Kim,출고 미확정,486
 2026-10,1205046,902070007,Asian,West,Kwang Hyuk Kim,10월 출고 확정,54
-2026-10,1205051,101070153,Asian,East,Wei Ren,출고 미확정,144
-2026-10,1205051,101070154,Asian,East,Wei Ren,출고 미확정,288
-2026-10,1205051,101070156,Asian,East,Wei Ren,출고 미확정,720
-2026-10,1205051,101070158,Asian,East,Wei Ren,출고 미확정,432
-2026-10,1205051,101070162,Asian,East,Wei Ren,출고 미확정,864
-2026-10,1205051,101070168,Asian,East,Wei Ren,출고 미확정,1872
+2026-10,1205051,101004229,Asian,East,Wei Ren,출고 미확정,162
+2026-10,1205051,101070153,Asian,East,Wei Ren,출고 미확정,432
+2026-10,1205051,101070154,Asian,East,Wei Ren,출고 미확정,576
+2026-10,1205051,101070156,Asian,East,Wei Ren,출고 미확정,1152
+2026-10,1205051,101070158,Asian,East,Wei Ren,출고 미확정,864
+2026-10,1205051,101070162,Asian,East,Wei Ren,출고 미확정,1584
+2026-10,1205051,101070165,Asian,East,Wei Ren,출고 미확정,864
+2026-10,1205051,101070168,Asian,East,Wei Ren,출고 미확정,2880
+2026-10,1205051,101070244,Asian,East,Wei Ren,출고 미확정,162
 2026-10,1205053,101002715,National,Dollar & New,Catherine Yang,10월 출고 확정,3312
 2026-10,1205053,101003241,National,Dollar & New,Catherine Yang,10월 출고 확정,6840
 2026-10,1205053,101003241,National,Dollar & New,Catherine Yang,출고 미확정,2880
@@ -1320,8 +1361,8 @@
 2026-10,1205077,101070165,Mainstream,Main Retail,Nicholas Park,10월 출고 확정,279
 2026-10,1205077,101070165,Mainstream,Main Retail,Nicholas Park,출고 미확정,630
 2026-10,1205079,101002381,Asian,West,Songho Choi,출고 미확정,150
+2026-10,1205079,101002640,Asian,West,Songho Choi,출고 미확정,144
 2026-10,1205079,101003347,Asian,West,Songho Choi,10월 출고 확정,864
-2026-10,1205079,101003360,Asian,West,Songho Choi,출고 미확정,1440
 2026-10,1205079,101007391,Asian,West,Songho Choi,10월 출고 확정,216
 2026-10,1205079,101070134,Asian,West,Songho Choi,10월 출고 확정,2592
 2026-10,1205079,101070153,Asian,West,Songho Choi,출고 미확정,144
@@ -1329,10 +1370,11 @@
 2026-10,1205079,101070165,Asian,West,Songho Choi,출고 미확정,288
 2026-10,1205079,101070168,Asian,West,Songho Choi,출고 미확정,864
 2026-10,1205079,101070244,Asian,West,Songho Choi,출고 미확정,162
+2026-10,1205079,102001641,Asian,West,Songho Choi,출고 미확정,48
 2026-10,1205079,102001743,Asian,West,Songho Choi,10월 출고 확정,144
 2026-10,1205079,102002006,Asian,West,Songho Choi,10월 출고 확정,90
 2026-10,1205079,902070007,Asian,West,Songho Choi,10월 출고 확정,756
-2026-10,1205079,902070007,Asian,West,Songho Choi,출고 미확정,864
+2026-10,1205079,902070007,Asian,West,Songho Choi,출고 미확정,972
 2026-10,C5800,101002613,Export,Canada (Export),Andy,10월 출고 확정,1200
 2026-10,C5800,101003028,Export,Canada (Export),Andy,10월 출고 확정,5400
 2026-10,C5800,101003119,Export,Canada (Export),Andy,10월 출고 확정,292
