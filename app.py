@@ -1515,27 +1515,54 @@ def load_item_class(item_mtime):
 NEWPROD_STORE = os.path.join(HIST_DIR, "newproduct.csv")
 NEWPROD_COLS = ['제품코드', '제품명', '기준월', '수요계획', '공급량', '출고량', '기초재고']
 # 엑셀 하위 헤더 → 내부 명칭
-NEWPROD_FIELD_MAP = {'수요계획': '수요계획', '입고': '공급량', '출고': '출고량', '기말재고': '기말재고'}
+#   월 2열 양식(권장): 수요계획 / 생산계획   ← 이 둘만 수기 관리
+#   월 4열 양식(구): 수요계획 / 입고 / 출고 / 기말재고  ← 출고·기말재고는 이제 시스템이 덮어씀
+#   '생산계획'(생산실적+잔여생산계획)은 '입고'와 같은 슬롯(공급량)에 들어간다.
+NEWPROD_FIELD_MAP = {
+    '수요계획': '수요계획', '수요': '수요계획', '수요 계획': '수요계획',
+    '생산계획': '공급량', '생산 계획': '공급량', '생산': '공급량',
+    '입고': '공급량', '공급량': '공급량', '공급': '공급량',
+    '출고': '출고량', '출고량': '출고량',
+    '기말재고': '기말재고', '기말': '기말재고',
+}
+NEWPROD_SUPPLY_LABEL = '생산계획'      # 화면 표시용 (내부 저장 컬럼명은 '공급량' 유지)
 NEWPROD_MONTH_ABBR = {m: i + 1 for i, m in enumerate(
     ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'])}
 
 
-def parse_newprod_month(label, base_year):
-    """'Jan' / 'Jan 2026' / '1월' / '2026-01' 등 → 'YYYY-MM'"""
+def parse_newprod_month_parts(label):
+    """'Jan' / 'Sept' / 'Jan 2027' / '1월' / '2026-01' → (연도 또는 None, 월).
+       연도가 적혀 있지 않으면 None을 돌려주고, 호출부에서 롤오버로 결정한다."""
     s = str(label).replace('\xa0', ' ').strip()
     if not s or s.lower().startswith('unnamed'):
         return None
     m = re.fullmatch(r'(\d{4})[-/.](\d{1,2})', s)
     if m:
-        return f"{m.group(1)}-{int(m.group(2)):02d}"
-    m = re.fullmatch(r'(\d{1,2})\s*월', s)
+        return (int(m.group(1)), int(m.group(2)))
+    m = re.fullmatch(r"(\d{1,2})\s*월\s*(?:'?(\d{2,4}))?", s)
     if m:
-        return f"{base_year}-{int(m.group(1)):02d}"
-    m = re.match(r'([A-Za-z]{3})[a-z]*\.?\s*(\d{4})?', s)
+        yr = m.group(2)
+        if yr:
+            yr = int(yr)
+            yr = yr + 2000 if yr < 100 else yr
+        return (yr, int(m.group(1)))
+    m = re.match(r"([A-Za-z]{3})[a-z]*\.?\s*'?(\d{2,4})?", s)
     if m and m.group(1).upper() in NEWPROD_MONTH_ABBR:
-        yr = m.group(2) or base_year
-        return f"{yr}-{NEWPROD_MONTH_ABBR[m.group(1).upper()]:02d}"
+        yr = m.group(2)
+        if yr:
+            yr = int(yr)
+            yr = yr + 2000 if yr < 100 else yr
+        return (yr, NEWPROD_MONTH_ABBR[m.group(1).upper()])
     return None
+
+
+def parse_newprod_month(label, base_year):
+    """'Jan' / 'Jan 2026' / '1월' / '2026-01' 등 → 'YYYY-MM' (연도 미표기는 base_year)"""
+    p = parse_newprod_month_parts(label)
+    if not p:
+        return None
+    yr, mon = p
+    return f"{int(yr or base_year):04d}-{mon:02d}"
 
 
 def process_newprod_upload(f, base_year):
@@ -1580,17 +1607,34 @@ def process_newprod_upload(f, base_year):
         name_i = code_i + 1
 
     # (열 인덱스 → 기준월, 항목) 매핑
+    # 🎯 [연도 롤오버] 헤더가 'Sept / Oct / Nov / Dec / Jan / Feb' 처럼 연도 없이 오는 경우,
+    #    월 번호가 작아지는 지점에서 연도를 +1 한다. (Dec 다음의 Jan을 당해 1월로 읽는 사고 방지)
+    #    헤더에 연도가 적혀 있으면 그 값이 항상 우선이며, 기준연도가 거기서 다시 이어진다.
+    col_month, cur_yr, prev_mon = {}, int(base_year), None
+    for i, mlab in enumerate(months):
+        p = parse_newprod_month_parts(mlab) if mlab else None
+        if not p:
+            continue
+        yr, mon = p
+        if yr:                                  # 연도가 적혀 있으면 그대로 따르고 기준을 재설정
+            cur_yr = int(yr)
+        elif prev_mon is not None and mon < prev_mon:
+            cur_yr += 1                         # 월 번호가 되돌아가면 해가 바뀐 것
+        col_month[i] = f"{cur_yr:04d}-{mon:02d}"
+        prev_mon = mon
+
     cells = {}
     for i, sv in enumerate(sub):
-        s = '' if pd.isna(sv) else str(sv).strip()
-        fld = NEWPROD_FIELD_MAP.get(s)
+        s = '' if pd.isna(sv) else str(sv).replace('\xa0', ' ').strip()
+        fld = NEWPROD_FIELD_MAP.get(s) or NEWPROD_FIELD_MAP.get(s.replace(' ', ''))
         if not fld:
             continue
-        mm = parse_newprod_month(months[i], base_year)
+        mm = col_month.get(i)
         if mm:
             cells[i] = (mm, fld)
     if not cells:
-        return None, "월별 항목(수요계획/입고/출고/기말재고)을 찾지 못했습니다."
+        return None, ("월별 항목을 찾지 못했습니다. 2행째 하위 헤더가 "
+                      "'수요계획 / 생산계획'(권장) 또는 '수요계획 / 입고 / 출고 / 기말재고'인지 확인해주세요.")
 
     recs, new_seq = [], 0
     for _, row in body.iterrows():
@@ -3241,21 +3285,8 @@ def render_progress_tab():
     merged['제품명'] = merged['제품명'].fillna('품목마스터 누락')
     merged['국가'] = merged['국가'].fillna('미분류')
 
-    # 🔍 집계 차이 추적: 어느 단계에서 얼마가 빠지는지 기록
-    _diag, _base0 = [], float(merged['실적수량'].sum())
-    _d1 = merged[merged['제품코드'].isin(final_drop_codes)]
-    if not _d1.empty and _d1['실적수량'].sum() > 0:
-        _diag.append(('제외 품목·수입품(TRA.GOODS)', float(_d1['실적수량'].sum()),
-                      sorted(_d1.groupby('제품코드')['실적수량'].sum()
-                             .sort_values(ascending=False).head(8).items())))
     merged = merged[~merged['제품코드'].isin(final_drop_codes)]
-
     for col in GROUP_COLS + ['제품명']:
-        _d2 = merged[merged[col] == '미상']
-        if not _d2.empty and _d2['실적수량'].sum() > 0:
-            _diag.append((f"{col} 미상", float(_d2['실적수량'].sum()),
-                          sorted(_d2.groupby('제품코드')['실적수량'].sum()
-                                 .sort_values(ascending=False).head(8).items())))
         merged = merged[merged[col] != '미상']
 
     if merged.empty:
@@ -3263,24 +3294,15 @@ def render_progress_tab():
 
     all_countries = sorted(merged['국가'].unique())
     sel_countries = st.multiselect("🌍 국가 필터", all_countries, default=all_countries, key="prog_country")
-    _d3 = merged[~merged['국가'].isin(sel_countries)]
-    if not _d3.empty and _d3['실적수량'].sum() > 0:
-        _diag.append(('국가 필터 제외', float(_d3['실적수량'].sum()),
-                      sorted(_d3.groupby('제품코드')['실적수량'].sum()
-                             .sort_values(ascending=False).head(8).items())))
     merged = merged[merged['국가'].isin(sel_countries)]
 
-    # 🔍 원본 대비 집계 차이 안내
-    _raw_conf = float(prog_m[prog_m['마감여부'].isin(sel_status)]['실적수량'].sum())
-    _now_conf = float(merged['실적수량'].sum())
-    if abs(_raw_conf - _now_conf) > 0.5:
-        with st.expander(f"⚠️ 원본 대비 {int(round(_raw_conf - _now_conf)):,} 박스가 집계에서 제외됨 "
-                         f"(원본 {int(round(_raw_conf)):,} → 표시 {int(round(_now_conf)):,})"):
-            for _nm, _qty, _top in _diag:
-                st.markdown(f"**{_nm}: {int(round(_qty)):,} 박스**")
-                st.caption('  /  '.join(f"{c} {int(round(q)):,}" for c, q in _top))
-            st.caption("제외 품목 리스트·수입품(TRA.GOODS)·조직 미상·국가 필터에 걸린 물량입니다. "
-                       "원본 합계와 대조할 때 이 값을 더하면 맞아떨어집니다.")
+    # 🎯 [빈 행 숨김] 계획·당월확정·미확정이 모두 0인 행은 정보가 없으므로 표에서 제외한다.
+    #    (통합코드 처리 등으로 행만 생성되고 수치는 전부 0인 품목이 남는 것을 방지)
+    #    '차월 이후 확정분 함께 보기'가 켜져 있을 때만 차월확정도 판단에 포함 → 차월 물량만
+    #    있는 품목은 체크를 켰을 때 보이고, 껐을 때는 숨는다. 모두 합계가 0이므로 총계 불변.
+    _qcols = ['계획수량', '실적수량', '미확정'] + (['차월확정'] if show_next else [])
+    merged = merged[merged[_qcols].abs().sum(axis=1) > 0]
+
     if merged.empty:
         return st.info("선택한 국가에 해당하는 데이터가 없습니다.")
 
@@ -3290,6 +3312,11 @@ def render_progress_tab():
     st.markdown(f"##### ① 품목별 진척도 ({month}) — 확정 기준 + 미확정 포함 시나리오")
     prod = merged.groupby(['제품코드', '제품명'], as_index=False)[
         ['계획수량', '실적수량', '미확정', '차월확정']].sum()
+    # 🎯 [빈 행 숨김 - 제품 단위] 거래처별로 +/- 가 상계되어 제품 합계가 0이 되는 경우까지 제외.
+    #    기준은 '화면에 표시되는 수치가 전부 0인가'. 전부 0이므로 총계·진척도는 변하지 않는다.
+    prod = prod[prod[_qcols].abs().sum(axis=1) > 0]
+    if prod.empty:
+        return st.info("표시할 품목이 없습니다. (계획·실적·미확정이 모두 0)")
     prod['진척도'] = [compute_progress(p, a) for p, a in zip(prod['계획수량'], prod['실적수량'])]
     prod['GAP'] = prod['계획수량'] - prod['실적수량']
     # 미확정 포함 시나리오
@@ -3502,23 +3529,37 @@ def render_progress_tab():
 
 # 🎯 [추가됨] 신제품 출고량을 시스템 실적으로 대체
 #    우선순위: ① 출고 마감 실적(actual_history) ② 당월 진척도의 '당월 출고 확정'분 ③ 엑셀 값
+#    + 엑셀에 없는 월이라도 시스템에 출고가 있으면 행을 새로 만들어 붙인다.
+#      (영업기획 파일 갱신이 늦어도 당월 출고가 바로 반영되도록. 단, 그 품목이 파일에
+#       등장한 첫 달 이후의 월만 추가하여 코드 재사용으로 과거가 딸려오는 것을 막는다.)
 def apply_system_actuals(npd):
     if npd is None or npd.empty:
         return npd
     out = npd.copy()
+    out['제품코드'] = out['제품코드'].astype(str)
+    out['기준월'] = out['기준월'].astype(str)
     out['출고량'] = pd.to_numeric(out['출고량'], errors='coerce').fillna(0.0)
+    for _c in ['수요계획', '공급량', '기초재고']:
+        if _c in out.columns:
+            out[_c] = pd.to_numeric(out[_c], errors='coerce')
     out['_출처'] = '파일'
+
+    def _by_month(df, qty):
+        if df is None or df.empty:
+            return pd.DataFrame(columns=['기준월', '제품코드', qty])
+        g = df.groupby(['기준월', '제품코드'], as_index=False)[qty].sum()
+        g['기준월'] = g['기준월'].astype(str)
+        g['제품코드'] = g['제품코드'].astype(str)
+        return g
 
     # ① 월 마감 실적
     try:
         act = apply_period_rules(load_store(ACT_STORE, ACT_COLS, '실적수량'), 'actual')
     except Exception:
-        act = pd.DataFrame(columns=['기준월', '제품코드', '실적수량'])
-    if not act.empty:
-        a = act.groupby(['기준월', '제품코드'], as_index=False)['실적수량'].sum()
-        a['기준월'] = a['기준월'].astype(str)
-        a['제품코드'] = a['제품코드'].astype(str)
-        m = out[['기준월', '제품코드']].astype(str).merge(a, on=['기준월', '제품코드'], how='left')
+        act = None
+    a = _by_month(act, '실적수량')
+    if not a.empty:
+        m = out[['기준월', '제품코드']].merge(a, on=['기준월', '제품코드'], how='left')
         hit = m['실적수량'].notna().values
         out.loc[hit, '출고량'] = m.loc[hit, '실적수량'].values
         out.loc[hit, '_출처'] = '출고실적'
@@ -3527,9 +3568,9 @@ def apply_system_actuals(npd):
     try:
         prog = apply_period_rules(load_store(PROG_STORE, PROG_COLS, '실적수량'), 'actual')
     except Exception:
-        prog = pd.DataFrame(columns=['기준월', '제품코드', '마감여부', '실적수량'])
-    if not prog.empty:
-        rows = []
+        prog = None
+    rows = []
+    if prog is not None and not prog.empty:
         for mth, g in prog.groupby('기준월'):
             try:
                 mnum = str(int(str(mth)[5:7]))
@@ -3541,15 +3582,103 @@ def apply_system_actuals(npd):
                 sel = [s for s in g['마감여부'].unique() if '확정' in str(s) and '미확정' not in str(s)]
             if sel:
                 rows.append(g[g['마감여부'].isin(sel)])
-        if rows:
-            p = pd.concat(rows, ignore_index=True).groupby(
-                ['기준월', '제품코드'], as_index=False)['실적수량'].sum()
-            p['기준월'] = p['기준월'].astype(str)
-            p['제품코드'] = p['제품코드'].astype(str)
-            m2 = out[['기준월', '제품코드']].astype(str).merge(p, on=['기준월', '제품코드'], how='left')
-            fill = (out['_출처'] == '파일').values & m2['실적수량'].notna().values
-            out.loc[fill, '출고량'] = m2.loc[fill, '실적수량'].values
-            out.loc[fill, '_출처'] = '진척도(확정)'
+    p = _by_month(pd.concat(rows, ignore_index=True) if rows else None, '실적수량')
+    if not p.empty:
+        m2 = out[['기준월', '제품코드']].merge(p, on=['기준월', '제품코드'], how='left')
+        fill = (out['_출처'] == '파일').values & m2['실적수량'].notna().values
+        out.loc[fill, '출고량'] = m2.loc[fill, '실적수량'].values
+        out.loc[fill, '_출처'] = '진척도(확정)'
+
+    # ③ 엑셀에 아예 없는 월 보강 — 출고 마감 실적 우선, 없으면 진척도 확정분
+    first_m = out.groupby('제품코드')['기준월'].min().to_dict()   # 품목별 파일 최초 등장월
+    names = dict(zip(out['제품코드'], out['제품명'].astype(str)))
+    have = set(zip(out['제품코드'], out['기준월']))
+    extra = {}
+    for src, tag in ((a, '출고실적(파일 외)'), (p, '진척도(파일 외)')):
+        if src.empty:
+            continue
+        for _, r in src.iterrows():
+            c, mth, q = r['제품코드'], r['기준월'], float(r['실적수량'])
+            if c not in first_m or (c, mth) in have or mth < first_m[c]:
+                continue
+            if abs(q) <= 0 or (c, mth) in extra:      # ①이 이미 채웠으면 ②는 건너뜀
+                continue
+            extra[(c, mth)] = (q, tag)
+    if extra:
+        add = pd.DataFrame([{'제품코드': c, '제품명': names.get(c, ''), '기준월': mth,
+                             '수요계획': np.nan, '공급량': np.nan, '출고량': q,
+                             '기초재고': np.nan, '_출처': tag}
+                            for (c, mth), (q, tag) in extra.items()])
+        out = pd.concat([out, add], ignore_index=True)
+    return out
+
+
+# 🎯 [추가됨] 신제품 기초재고를 시스템 값으로 갱신
+#    ① WMS 재고 스냅샷이 있는 달: 그 달 '첫 스냅샷'의 기초재고 합계(전 창고 + Transfer) = 실측
+#       - 1일 스냅샷이 없으면 그 달의 가장 이른 스냅샷을 쓰고, 11일 이후면 '재고(근사)'로 표기
+#    ② 스냅샷이 아직 없는 달(미래): 직전 달 기초재고 + 직전 달 공급량 − 직전 달 출고량 = 추정
+#    ③ WMS 수집 시작 이전 달: 영업기획 파일 값 그대로
+INV_STOCK_NEAR_DAY = 10          # 이 날짜 이내의 첫 스냅샷이면 '실측', 넘으면 '근사'
+
+
+def apply_system_stock(npd):
+    if npd is None or npd.empty:
+        return npd
+    out = npd.copy()
+    out['제품코드'] = out['제품코드'].astype(str)
+    out['기준월'] = out['기준월'].astype(str)
+    out['기초재고'] = pd.to_numeric(out['기초재고'], errors='coerce')
+    out['_재고출처'] = '파일'
+    out['_재고일자'] = ''
+
+    # --- WMS 스냅샷에서 월별 첫 스냅샷의 품목별 기초재고 합계 ---
+    try:
+        inv = load_simple_store(INV_STORE, INV_COLS, ['기초재고', '입고', '출고', '예상재고'])
+    except Exception:
+        inv = pd.DataFrame()
+    first_snap = {}                      # 월 → 그 달의 첫 스냅샷 일자
+    stock = {}                           # (제품코드, 월) → 기초재고 합계
+    if not inv.empty:
+        inv = inv.copy()
+        inv['기준일자'] = inv['기준일자'].astype(str)
+        inv['제품코드'] = inv['제품코드'].astype(str).replace(PRODUCT_MAPPING)
+        dates = sorted(d for d in inv['기준일자'].unique() if d and d.strip())
+        for dt in dates:
+            mth = dt[:7]
+            if mth not in first_snap:    # dates가 오름차순이므로 첫 등장이 그 달의 최초 스냅샷
+                first_snap[mth] = dt
+        use_dates = set(first_snap.values())
+        g = (inv[inv['기준일자'].isin(use_dates)]
+             .groupby(['기준일자', '제품코드'], as_index=False)['기초재고'].sum())
+        d2m = {v: k for k, v in first_snap.items()}
+        for _, r in g.iterrows():
+            stock[(r['제품코드'], d2m[r['기준일자']])] = float(r['기초재고'])
+    snap_months = sorted(first_snap)
+    first_wms = snap_months[0] if snap_months else None
+
+    # --- 품목별로 월 순회: 실측 → 추정 → 파일 ---
+    out = out.sort_values(['제품코드', '기준월']).reset_index(drop=True)
+    for code, idxs in out.groupby('제품코드').groups.items():
+        prev = None                      # (직전달 기초재고, 직전달 공급량, 직전달 출고량)
+        for i in idxs:
+            mth = out.at[i, '기준월']
+            if mth in first_snap:
+                # 그 달에 스냅샷이 있으면 실측(해당 품목 재고가 없으면 0)
+                val = stock.get((code, mth), 0.0)
+                day = int(first_snap[mth][8:10]) if len(first_snap[mth]) >= 10 else 1
+                out.at[i, '기초재고'] = val
+                out.at[i, '_재고출처'] = '실측'
+                # 월초가 아닌 늦은 스냅샷을 월초값으로 쓴 경우만 별도 표시 (주말·업로드 누락 등)
+                out.at[i, '_재고일자'] = first_snap[mth] if day > INV_STOCK_NEAR_DAY else ''
+            elif prev is not None and first_wms is not None and mth > first_wms:
+                # WMS 수집 시작 이후인데 스냅샷이 없는 달(미래) → 직전 달에서 순차 추정
+                ps, pi, po = prev
+                if ps is not None and not pd.isna(ps):
+                    out.at[i, '기초재고'] = float(ps) + float(pi or 0) - float(po or 0)
+                    out.at[i, '_재고출처'] = '추정'
+            prev = (out.at[i, '기초재고'],
+                    pd.to_numeric(pd.Series([out.at[i, '공급량']]), errors='coerce').fillna(0).iloc[0],
+                    pd.to_numeric(pd.Series([out.at[i, '출고량']]), errors='coerce').fillna(0).iloc[0])
     return out
 
 
@@ -3570,6 +3699,8 @@ def render_newproduct_tab():
 
     # 🎯 출고량은 시스템 실적 우선 (출고 마감 실적 → 없으면 당월 진척도 확정분 → 없으면 엑셀 값)
     npd = apply_system_actuals(npd)
+    # 🎯 기초재고는 WMS 재고 스냅샷 우선 → 미래 달은 (직전 재고 + 공급량 − 출고량) 추정
+    npd = apply_system_stock(npd)
 
     # 🎯 제품명은 품목마스터 기준으로 통일 (업로드 파일의 SCM 편의 명칭 대신)
     try:
@@ -3652,8 +3783,13 @@ def render_newproduct_tab():
     tbl.columns = [str(c) for c in tbl.columns]
     tbl['합계'] = [np.nan, d['공급량'].sum(), d['출고량'].sum(), d['수요계획'].sum(), d['GAP'].sum()]
     tbl = tbl.reset_index().rename(columns={'index': '구분'})
+    tbl['구분'] = tbl['구분'].replace({'공급량': NEWPROD_SUPPLY_LABEL})   # 화면만 '생산계획'
 
     def _f(x):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return '-'
+        if isinstance(x, str):
+            return x
         if pd.isna(x):
             return '-'
         return f"{int(round(x)):,}"
@@ -3676,10 +3812,38 @@ def render_newproduct_tab():
                  height=37 * (len(tbl) + 1) + 12, column_config=cfg_np)
     _src = d['_출처'].value_counts().to_dict() if '_출처' in d.columns else {}
     _srctxt = ' / '.join(f"{k} {v}개월" for k, v in _src.items()) if _src else ''
-    st.caption("💡 GAP = 수요계획 − 출고량 (양수 = 계획 대비 미달). 기초재고는 파일 값을 그대로 사용합니다. "
-               "네 항목이 모두 비어 있는 달(미출시 구간)은 표시하지 않습니다. "
-               "출고량은 시스템 실적(출고 마감 → 진척도 확정분) 우선이며, 시스템에 없는 달만 파일 값을 씁니다."
-               + (f" [출처: {_srctxt}]" if _srctxt else ""))
+    # 🎯 추정 재고가 음수면 결품 예고 — 생산계획 미입력일 때도 여기서 드러난다
+    if '_재고출처' in d.columns:
+        _neg = d[(d['_재고출처'] == '추정') & (pd.to_numeric(d['기초재고'], errors='coerce') < 0)]
+        if not _neg.empty:
+            st.warning(f"⚠️ 추정 기초재고가 음수인 달: {', '.join(map(str, _neg['기준월']))}  —  "
+                       f"{NEWPROD_SUPPLY_LABEL} 대비 출고가 많아 재고가 바닥난다는 뜻입니다. "
+                       f"{NEWPROD_SUPPLY_LABEL} 칸이 비어 있으면 공급이 0으로 계산되니, "
+                       "먼저 그 칸이 채워져 있는지 확인해주세요.")
+
+    # 기초재고 출처 요약 — 월 범위로 한 줄 (어느 달이 추정인지만 알면 충분)
+    _stktxt = ''
+    if '_재고출처' in d.columns:
+        _parts = []
+        for _k in ['실측', '추정', '파일']:
+            _ms = [str(m) for m, s in zip(d['기준월'], d['_재고출처']) if s == _k]
+            if _ms:
+                _parts.append(f"{_k} {_ms[0]}~{_ms[-1]}" if len(_ms) > 1 else f"{_k} {_ms[0]}")
+        _stktxt = ' · '.join(_parts)
+        _late = [(str(m), j) for m, s, j in zip(d['기준월'], d['_재고출처'], d['_재고일자'])
+                 if s == '실측' and str(j).strip()]
+        if _late:
+            st.caption("※ 월초 재고 스냅샷이 없어 다음 달은 월 중 재고를 월초값으로 사용했습니다: "
+                       + ', '.join(f"{m} → {j}" for m, j in _late))
+    st.caption("💡 GAP = 수요계획 − 출고량 (양수 = 계획 대비 미달). "
+               "**출고량**은 시스템 자동(출고 마감 실적 → 당월 진척도 확정분 → 파일 값). "
+               "**기초재고**는 WMS 재고 스냅샷의 월초값(실측)을 쓰고, 스냅샷이 없는 달은 "
+               "`직전 달 기초재고 + 생산계획 − 출고량`으로 추정합니다. "
+               "**수요계획·생산계획(=생산실적+잔여생산계획) 두 항목만 파일 값**이라 파일을 다시 올려야 바뀝니다. "
+               "파일에 없는 달도 시스템 출고가 있으면 행을 만들어 보여줍니다. "
+               "네 항목이 모두 비어 있는 달(미출시 구간)은 표시하지 않습니다."
+               + (f"  [출고 {_srctxt}]" if _srctxt else "")
+               + (f"  [기초재고 {_stktxt}]" if _stktxt else ""))
 
 
 # =============================================================
@@ -4441,10 +4605,14 @@ if IS_ADMIN:
 if IS_ADMIN:
     st.sidebar.divider()
     st.sidebar.header("🆕 신제품 관리 데이터")
-    st.sidebar.caption("Material / Material Description + 월별(수요계획·입고·출고·기말재고) 2행 헤더 엑셀. "
-                       "업로드 시 전체 교체됩니다. 제목 줄이 위에 있어도 자동으로 헤더를 찾습니다.")
-    np_year = st.sidebar.number_input("기준연도 (헤더에 연도가 없을 때)", min_value=2020, max_value=2100,
+    st.sidebar.caption("Material / Material Description + 2행 헤더 엑셀. 월마다 **2열(수요계획·생산계획)**만 "
+                       "두면 됩니다 — 출고량과 기초재고는 시스템이 자동 산출합니다. "
+                       "구 양식(수요계획·입고·출고·기말재고 4열)도 그대로 읽히며, 이 경우 출고·기말재고는 "
+                       "시스템 값으로 덮어씁니다. 업로드 시 전체 교체되고, 제목 줄이 위에 있어도 헤더를 자동으로 찾습니다.")
+    np_year = st.sidebar.number_input("기준연도 (헤더에 연도가 없을 때 '첫 월'의 연도)", min_value=2020, max_value=2100,
                                       value=int(pd.Timestamp.today().year), step=1, key="np_year")
+    st.sidebar.caption("↳ 'Sept·Oct·Nov·Dec·Jan' 처럼 연도가 없어도 월이 되돌아가면 연도를 자동으로 +1 합니다. "
+                       "헤더에 'Jan 2027'처럼 연도를 적어두시면 가장 확실합니다.")
     np_file = st.sidebar.file_uploader("10. 신제품 관리 파일", type=['xlsx', 'csv'], key="up_np")
     if np_file is not None and st.sidebar.button("✅ 신제품 데이터 반영", key="np_btn"):
         try:
