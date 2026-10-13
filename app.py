@@ -3589,36 +3589,57 @@ def apply_system_actuals(npd):
         out.loc[fill, '출고량'] = m2.loc[fill, '실적수량'].values
         out.loc[fill, '_출처'] = '진척도(확정)'
 
+    # ②-b 미확정(예상) 오더 — 그래프에 확정 위로 얹어 보여주는 보조값
+    und = None
+    if prog is not None and not prog.empty:
+        _u = prog[prog['마감여부'].astype(str).str.contains('미확정', na=False)]
+        und = _u if not _u.empty else None
+    u = _by_month(und, '실적수량')
+    out['_미확정'] = 0.0
+    if not u.empty:
+        m3 = out[['기준월', '제품코드']].merge(u, on=['기준월', '제품코드'], how='left')
+        out['_미확정'] = pd.to_numeric(m3['실적수량'], errors='coerce').fillna(0.0).values
+        # 이미 마감된 달은 미확정이 의미 없다 (진척도 잔여 데이터 방지)
+        out.loc[out['_출처'] == '출고실적', '_미확정'] = 0.0
+
     # ③ 엑셀에 아예 없는 월 보강 — 출고 마감 실적 우선, 없으면 진척도 확정분
     first_m = out.groupby('제품코드')['기준월'].min().to_dict()   # 품목별 파일 최초 등장월
     names = dict(zip(out['제품코드'], out['제품명'].astype(str)))
     have = set(zip(out['제품코드'], out['기준월']))
     extra = {}
-    for src, tag in ((a, '출고실적(파일 외)'), (p, '진척도(파일 외)')):
+    for src, tag in ((a, '출고실적(파일 외)'), (p, '진척도(파일 외)'), (u, '진척도(미확정)')):
         if src.empty:
             continue
         for _, r in src.iterrows():
             c, mth, q = r['제품코드'], r['기준월'], float(r['실적수량'])
             if c not in first_m or (c, mth) in have or mth < first_m[c]:
                 continue
-            if abs(q) <= 0 or (c, mth) in extra:      # ①이 이미 채웠으면 ②는 건너뜀
+            if abs(q) <= 0 or (c, mth) in extra:      # 앞 순위가 이미 채웠으면 건너뜀
                 continue
             extra[(c, mth)] = (q, tag)
     if extra:
+        _umap = {(r['제품코드'], r['기준월']): float(r['실적수량'])
+                 for _, r in u.iterrows()} if not u.empty else {}
         add = pd.DataFrame([{'제품코드': c, '제품명': names.get(c, ''), '기준월': mth,
-                             '수요계획': np.nan, '공급량': np.nan, '출고량': q,
-                             '기초재고': np.nan, '_출처': tag}
+                             '수요계획': np.nan, '공급량': np.nan,
+                             '출고량': (0.0 if tag == '진척도(미확정)' else q),
+                             '기초재고': np.nan, '_출처': tag,
+                             '_미확정': _umap.get((c, mth), 0.0)}
                             for (c, mth), (q, tag) in extra.items()])
         out = pd.concat([out, add], ignore_index=True)
+    out['_미확정'] = pd.to_numeric(out['_미확정'], errors='coerce').fillna(0.0)
     return out
 
 
 # 🎯 [추가됨] 신제품 기초재고를 시스템 값으로 갱신
 #    ① WMS 재고 스냅샷이 있는 달: 그 달 '첫 스냅샷'의 기초재고 합계(전 창고 + Transfer) = 실측
 #       - 1일 스냅샷이 없으면 그 달의 가장 이른 스냅샷을 쓰고, 11일 이후면 '재고(근사)'로 표기
-#    ② 스냅샷이 아직 없는 달(미래): 직전 달 기초재고 + 직전 달 공급량 − 직전 달 출고량 = 추정
+#    ② 스냅샷이 아직 없는 달: 직전 달 기초재고 + 생산계획 − 소진량 = 추정(시뮬레이션)
+#       소진량 = 마감된 달이면 '출고 실적', 마감 전(당월·미래)이면 max(수요계획, 확정 오더)
+#       → 미래 구간은 수요계획만큼 빠지고 생산계획만큼 더해지며 굴러간다
 #    ③ WMS 수집 시작 이전 달: 영업기획 파일 값 그대로
-INV_STOCK_NEAR_DAY = 10          # 이 날짜 이내의 첫 스냅샷이면 '실측', 넘으면 '근사'
+INV_STOCK_NEAR_DAY = 10          # 월초로 인정할 최대 일자. 이 날짜 이내 스냅샷만 그 달의 기초재고로 사용.
+                                 # (월 중순 재고를 월초값으로 쓰면 틀리므로, 없으면 차라리 추정)
 
 
 def apply_system_stock(npd):
@@ -3645,7 +3666,13 @@ def apply_system_stock(npd):
         dates = sorted(d for d in inv['기준일자'].unique() if d and d.strip())
         for dt in dates:
             mth = dt[:7]
-            if mth not in first_snap:    # dates가 오름차순이므로 첫 등장이 그 달의 최초 스냅샷
+            try:
+                day = int(dt[8:10])
+            except Exception:
+                day = 1
+            # 월초(1~INV_STOCK_NEAR_DAY일) 스냅샷만 그 달의 기초재고로 인정.
+            # 월 중순부터 올리기 시작한 달은 스냅샷이 있어도 '추정'으로 넘긴다.
+            if day <= INV_STOCK_NEAR_DAY and mth not in first_snap:
                 first_snap[mth] = dt
         use_dates = set(first_snap.values())
         g = (inv[inv['기준일자'].isin(use_dates)]
@@ -3656,29 +3683,37 @@ def apply_system_stock(npd):
     snap_months = sorted(first_snap)
     first_wms = snap_months[0] if snap_months else None
 
+    def _n(v):
+        v = pd.to_numeric(v, errors='coerce')
+        return 0.0 if pd.isna(v) else float(v)
+
+    def _outflow(i):
+        """그 달에 빠져나갈 물량.
+           마감된 달 → 확정된 출고 실적.
+           마감 전(당월·미래) → 수요계획. 단 이미 확정 출고가 계획을 넘었으면 그 실적."""
+        act = _n(out.at[i, '출고량'])
+        if str(out.at[i, '_출처'] if '_출처' in out.columns else '').startswith('출고실적'):
+            return act
+        return max(_n(out.at[i, '수요계획']), act)
+
     # --- 품목별로 월 순회: 실측 → 추정 → 파일 ---
     out = out.sort_values(['제품코드', '기준월']).reset_index(drop=True)
     for code, idxs in out.groupby('제품코드').groups.items():
-        prev = None                      # (직전달 기초재고, 직전달 공급량, 직전달 출고량)
+        prev = None                      # (직전달 기초재고, 직전달 생산계획, 직전달 소진량)
         for i in idxs:
             mth = out.at[i, '기준월']
             if mth in first_snap:
                 # 그 달에 스냅샷이 있으면 실측(해당 품목 재고가 없으면 0)
-                val = stock.get((code, mth), 0.0)
-                day = int(first_snap[mth][8:10]) if len(first_snap[mth]) >= 10 else 1
-                out.at[i, '기초재고'] = val
+                out.at[i, '기초재고'] = stock.get((code, mth), 0.0)
                 out.at[i, '_재고출처'] = '실측'
-                # 월초가 아닌 늦은 스냅샷을 월초값으로 쓴 경우만 별도 표시 (주말·업로드 누락 등)
-                out.at[i, '_재고일자'] = first_snap[mth] if day > INV_STOCK_NEAR_DAY else ''
+                out.at[i, '_재고일자'] = first_snap[mth]
             elif prev is not None and first_wms is not None and mth > first_wms:
-                # WMS 수집 시작 이후인데 스냅샷이 없는 달(미래) → 직전 달에서 순차 추정
+                # 스냅샷이 없는 달 → 직전 달에서 순차 추정 (생산계획 +, 소진량 −)
                 ps, pi, po = prev
                 if ps is not None and not pd.isna(ps):
-                    out.at[i, '기초재고'] = float(ps) + float(pi or 0) - float(po or 0)
+                    out.at[i, '기초재고'] = float(ps) + pi - po
                     out.at[i, '_재고출처'] = '추정'
-            prev = (out.at[i, '기초재고'],
-                    pd.to_numeric(pd.Series([out.at[i, '공급량']]), errors='coerce').fillna(0).iloc[0],
-                    pd.to_numeric(pd.Series([out.at[i, '출고량']]), errors='coerce').fillna(0).iloc[0])
+            prev = (out.at[i, '기초재고'], _n(out.at[i, '공급량']), _outflow(i))
     return out
 
 
@@ -3734,7 +3769,8 @@ def render_newproduct_tab():
     d['기준월'] = d['기준월'].astype(str)
     d = d.sort_values('기준월')
     # 네 항목이 모두 0인 달(미출시 구간)은 숨김
-    active = (d[['수요계획', '공급량', '출고량', '기초재고']].abs().sum(axis=1) > 0)
+    _act_cols = ['수요계획', '공급량', '출고량', '기초재고'] + (['_미확정'] if '_미확정' in d.columns else [])
+    active = (d[_act_cols].abs().sum(axis=1) > 0)
     d = d[active]
     if d.empty:
         return st.info("이 제품은 아직 계획·실적 데이터가 없습니다.")
@@ -3743,7 +3779,7 @@ def render_newproduct_tab():
     months = d['기준월'].tolist()
 
     # --- 차트 ---
-    st.markdown("##### 📈 수요계획 vs 출고량 (막대) + 기초재고 (선)")
+    st.markdown("##### 📈 수요계획 vs 출고량(확정 + 미확정) · 기초재고(선)")
     if PLOTLY_OK:
         def lab(x):
             try:
@@ -3753,9 +3789,17 @@ def render_newproduct_tab():
         ticks = [lab(x) for x in months]
         fig = go.Figure()
         fig.add_trace(go.Bar(x=months, y=d['수요계획'], name='수요계획', marker_color='#1E4D9A',
+                             offsetgroup='plan',
                              hovertemplate='%{x}<br>수요계획: %{y:,.0f}<extra></extra>'))
         fig.add_trace(go.Bar(x=months, y=d['출고량'], name='출고량', marker_color='#76A7E1',
-                             hovertemplate='%{x}<br>출고량: %{y:,.0f}<extra></extra>'))
+                             offsetgroup='act',
+                             hovertemplate='%{x}<br>출고량(확정): %{y:,.0f}<extra></extra>'))
+        # 🎯 미확정 오더는 확정 막대 위에 옅게 얹어 '이달에 다 나가면' 시나리오를 보여준다
+        if '_미확정' in d.columns and float(d['_미확정'].abs().sum()) > 0:
+            fig.add_trace(go.Bar(x=months, y=d['_미확정'], name='미확정(예상)',
+                                 marker_color='#C3DAF2', offsetgroup='act',
+                                 marker_line=dict(color='#76A7E1', width=1),
+                                 hovertemplate='%{x}<br>미확정: %{y:,.0f}<extra></extra>'))
         fig.add_trace(go.Scatter(x=months, y=d['기초재고'], name='기초재고', yaxis='y2',
                                  mode='lines+markers',
                                  line=dict(shape='spline', smoothing=1.3, width=3, color='#4CAF7D'),
@@ -3763,7 +3807,7 @@ def render_newproduct_tab():
                                              line=dict(width=2.5, color='#4CAF7D')),
                                  hovertemplate='%{x}<br>기초재고: %{y:,.0f}<extra></extra>'))
         fig.update_layout(
-            barmode='group', height=360, margin=dict(l=10, r=10, t=30, b=10),
+            barmode='relative', height=360, margin=dict(l=10, r=10, t=30, b=10),
             xaxis=dict(type='category', tickmode='array', tickvals=months, ticktext=ticks),
             yaxis=dict(title='박스', separatethousands=True, rangemode='tozero'),
             yaxis2=dict(title='기초재고', overlaying='y', side='right',
@@ -3772,8 +3816,12 @@ def render_newproduct_tab():
             hovermode='x unified')
         st.plotly_chart(fig, width='stretch', key=f"np_chart_{code}")
     else:
-        st.bar_chart(d.set_index('기준월')[['수요계획', '출고량']])
-    st.caption("💡 파란 막대(수요계획)보다 옅은 막대(출고량)가 낮으면 계획 대비 미달입니다. "
+        _bc = ['수요계획', '출고량'] + (['_미확정'] if '_미확정' in d.columns
+                                        and float(d['_미확정'].abs().sum()) > 0 else [])
+        st.bar_chart(d.set_index('기준월')[_bc].rename(columns={'_미확정': '미확정(예상)'}))
+    st.caption("💡 진한 막대(수요계획)보다 옅은 막대(출고량)가 낮으면 계획 대비 미달입니다. "
+               "출고 막대 위에 더 옅게 얹힌 칸은 **미확정 오더**로, 이달에 다 나갔을 때의 예상치입니다 "
+               "(마감된 달에는 표시되지 않습니다). "
                "초록 선(기초재고)이 계속 올라가면 계획만큼 팔리지 않아 재고가 쌓이고 있다는 뜻입니다.")
 
     # --- 표 (구분 × 월) ---
@@ -3816,29 +3864,35 @@ def render_newproduct_tab():
     if '_재고출처' in d.columns:
         _neg = d[(d['_재고출처'] == '추정') & (pd.to_numeric(d['기초재고'], errors='coerce') < 0)]
         if not _neg.empty:
-            st.warning(f"⚠️ 추정 기초재고가 음수인 달: {', '.join(map(str, _neg['기준월']))}  —  "
-                       f"{NEWPROD_SUPPLY_LABEL} 대비 출고가 많아 재고가 바닥난다는 뜻입니다. "
-                       f"{NEWPROD_SUPPLY_LABEL} 칸이 비어 있으면 공급이 0으로 계산되니, "
-                       "먼저 그 칸이 채워져 있는지 확인해주세요.")
+            st.warning(f"⚠️ 추정 기초재고가 음수로 떨어지는 달: {', '.join(map(str, _neg['기준월']))}  —  "
+                       f"수요계획을 {NEWPROD_SUPPLY_LABEL}이 못 따라가 결품이 예상된다는 뜻입니다. "
+                       f"{NEWPROD_SUPPLY_LABEL} 칸이 비어 있으면 공급이 0으로 계산되니 "
+                       "먼저 입력 여부부터 확인해주세요.")
 
-    # 기초재고 출처 요약 — 월 범위로 한 줄 (어느 달이 추정인지만 알면 충분)
+    # 기초재고 출처 요약 — 연속 구간끼리 묶어 한 줄 (중간에 빠진 달이 드러나도록)
+    def _runs(ms):
+        out, i = [], 0
+        while i < len(ms):
+            j = i
+            while j + 1 < len(ms) and month_shift(ms[j], 1) == ms[j + 1]:
+                j += 1
+            out.append(ms[i] if i == j else f"{ms[i]}~{ms[j]}")
+            i = j + 1
+        return ', '.join(out)
+
     _stktxt = ''
     if '_재고출처' in d.columns:
         _parts = []
         for _k in ['실측', '추정', '파일']:
-            _ms = [str(m) for m, s in zip(d['기준월'], d['_재고출처']) if s == _k]
+            _ms = sorted(str(m) for m, s in zip(d['기준월'], d['_재고출처']) if s == _k)
             if _ms:
-                _parts.append(f"{_k} {_ms[0]}~{_ms[-1]}" if len(_ms) > 1 else f"{_k} {_ms[0]}")
+                _parts.append(f"{_k} {_runs(_ms)}")
         _stktxt = ' · '.join(_parts)
-        _late = [(str(m), j) for m, s, j in zip(d['기준월'], d['_재고출처'], d['_재고일자'])
-                 if s == '실측' and str(j).strip()]
-        if _late:
-            st.caption("※ 월초 재고 스냅샷이 없어 다음 달은 월 중 재고를 월초값으로 사용했습니다: "
-                       + ', '.join(f"{m} → {j}" for m, j in _late))
     st.caption("💡 GAP = 수요계획 − 출고량 (양수 = 계획 대비 미달). "
                "**출고량**은 시스템 자동(출고 마감 실적 → 당월 진척도 확정분 → 파일 값). "
                "**기초재고**는 WMS 재고 스냅샷의 월초값(실측)을 쓰고, 스냅샷이 없는 달은 "
-               "`직전 달 기초재고 + 생산계획 − 출고량`으로 추정합니다. "
+               "`직전 달 기초재고 + 생산계획 − 소진량`으로 굴려서 추정합니다 "
+               "(소진량 = 마감된 달은 출고 실적, 마감 전·미래는 수요계획). "
                "**수요계획·생산계획(=생산실적+잔여생산계획) 두 항목만 파일 값**이라 파일을 다시 올려야 바뀝니다. "
                "파일에 없는 달도 시스템 출고가 있으면 행을 만들어 보여줍니다. "
                "네 항목이 모두 비어 있는 달(미출시 구간)은 표시하지 않습니다."
