@@ -333,7 +333,7 @@ master_path = os.path.join(DATA_DIR, "master.xlsx")
 item_master_path = os.path.join(DATA_DIR, "item_master.xlsx")
 exclusion_path = os.path.join(DATA_DIR, "exclusion.xlsx")
 
-@st.cache_data
+@st.cache_data(max_entries=3, ttl=3600)
 def load_master_lookup(master_mtime):
     master_df = normalize_cols(pd.read_excel(master_path))
     master_rename_dict = {
@@ -352,7 +352,7 @@ def load_master_lookup(master_mtime):
 CUSTOMER_NAME_CANDIDATES = ['거래처명', 'sold-to party name', 'customer name', 'name 1', 'name1',
                             'name', 'sold-to name', '거래처 명']
 
-@st.cache_data
+@st.cache_data(max_entries=3, ttl=3600)
 def load_customer_names(master_mtime):
     try:
         m = normalize_cols(pd.read_excel(master_path))
@@ -375,7 +375,7 @@ def load_customer_names(master_mtime):
     return dict(zip(m['거래처 코드'].astype(str), m[name_col].astype(str)))
 
 
-@st.cache_data
+@st.cache_data(max_entries=3, ttl=3600)
 def load_exclusion_rules(exc_mtime):
     """제외 품목 리스트 → (전 기간 제외 코드 set, {코드: 시작월} dict)
        C열(또는 '시작월' 컬럼)에 'YYYY-MM'이 있으면 그 달부터 제외, 비어 있으면 전 기간 제외."""
@@ -416,7 +416,7 @@ def load_exclusion_rules(exc_mtime):
     return always, from_month
 
 
-@st.cache_data
+@st.cache_data(max_entries=3, ttl=3600)
 def load_item_info_and_dropcodes(item_mtime, exc_mtime):
     item_master_df = normalize_cols(pd.read_excel(item_master_path))
     item_master_df.rename(columns={item_master_df.columns[3]: '국가'}, inplace=True)
@@ -664,23 +664,27 @@ def process_import_upload(f, month, report=None):
 # 히스토리 저장소 입출력 및 업서트
 # =============================================================
 # 🎯 [성능] CSV 저장소는 파일이 바뀌지 않는 한 다시 읽지 않음 (mtime 캐시)
-@st.cache_data(show_spinner=False)
-def _read_store_csv(path, mtime):
-    return pd.read_csv(path, dtype=str, encoding='utf-8-sig')
-
-def load_store(path, columns, qty_col):
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=columns)
-    df = _read_store_csv(path, file_mtime(path)).copy()
+#    ※ 원본 CSV만 캐시하고 매번 가공하면, 한 번의 화면 갱신에서 저장소 로드가
+#      수십 번 일어나므로 복사·형변환 비용이 그대로 누적된다.
+#      → '가공까지 끝낸 결과'를 캐시해 호출당 비용을 5~6배 줄인다.
+@st.cache_data(show_spinner=False, max_entries=6, ttl=3600)
+def _load_store_cached(path, mtime, columns, qty_col):
+    df = pd.read_csv(path, dtype=str, encoding='utf-8-sig')
     for c in columns:
         if c not in df.columns:
-            df[c] = '' if c != qty_col else 0
+            df[c] = '' if c != qty_col else '0'
     df[qty_col] = pd.to_numeric(df[qty_col], errors='coerce').fillna(0)
     # 문자 컬럼의 결측은 빈 문자열로 (정렬 시 str/float 혼합 오류 방지)
     for c in columns:
         if c != qty_col:
             df[c] = df[c].fillna('').astype(str)
-    return df[columns]
+    return df[list(columns)]
+
+
+def load_store(path, columns, qty_col):
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=columns)
+    return _load_store_cached(path, file_mtime(path), tuple(columns), qty_col)
 
 def save_store(df, path):
     df.to_csv(path, index=False, encoding='utf-8-sig')
@@ -774,7 +778,7 @@ def remap_org_current(df, master_mtime=None):
     return out
 
 
-@st.cache_data
+@st.cache_data(max_entries=2, ttl=3600)
 def build_history_df(plan_mtime, act_mtime, item_mtime, exc_mtime, rules_key,
                      master_mtime=0.0, np_mtime=0.0):
     plan = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
@@ -996,10 +1000,9 @@ def process_sales_history_upload(f):
     return out, None
 
 
-def load_simple_store(path, columns, num_cols):
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=columns)
-    df = _read_store_csv(path, file_mtime(path)).copy()
+@st.cache_data(show_spinner=False, max_entries=16, ttl=3600)
+def _load_simple_store_cached(path, mtime, columns, num_cols):
+    df = pd.read_csv(path, dtype=str, encoding='utf-8-sig')
     for c in columns:
         if c not in df.columns:
             df[c] = ''
@@ -1012,7 +1015,13 @@ def load_simple_store(path, columns, num_cols):
     for c in ['영업부코드', '영업지점코드']:
         if c in df.columns:
             df[c] = norm_code(df[c])
-    return df[columns]
+    return df[list(columns)]
+
+
+def load_simple_store(path, columns, num_cols):
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=columns)
+    return _load_simple_store_cached(path, file_mtime(path), tuple(columns), tuple(num_cols))
 
 # 🎯 빌링완료/빌링전도 월 단위 히스토리로 관리: 올린 달만 교체, 나머지 달은 그대로 보존
 def upsert_month_store(new_df, month, path, columns, num_cols):
@@ -1411,6 +1420,17 @@ INV_WAREHOUSES = list(INV_BLOCKS.keys())
 # [재고 추이 차트] y축 하한(박스). 0부터 그리면 변화가 눌려 보이므로 바닥을 올려 잡는다.
 #   None으로 두면 자동(0부터). 상한은 지정하지 않아 데이터가 커져도 잘리지 않는다.
 INV_TREND_YMIN = 2_000_000
+# 🎯 [조절용] 재고 소진 개월 수 경고 기준 — 구분별로 다르게 적용.
+#   (하한 미만 = 결품 위험 🔴 / 상한 초과 = 과잉 재고 🔵)
+#   수입품은 해상 운송 등 조달 리드타임이 길어 더 두텁게 들고 있는 것이 정상이므로 폭을 넓게 잡는다.
+#   숫자만 바꾸면 표 색상·필터·설명 문구가 한꺼번에 따라간다.
+INV_COVER_LIMITS = {'자사제조': (1.0, 3.0), '수입': (2.0, 4.0)}
+INV_COVER_DEFAULT = (1.0, 3.0)      # 구분이 위 목록에 없을 때
+
+
+def inv_cover_limits(cls):
+    """구분(자사제조/수입) → (결품 기준, 과잉 기준)"""
+    return INV_COVER_LIMITS.get(str(cls).strip(), INV_COVER_DEFAULT)
 
 
 def idx_to_col_letter(i):
@@ -1498,7 +1518,7 @@ def process_inventory_upload(f, snap_date):
     return out[INV_COLS], None
 
 
-@st.cache_data
+@st.cache_data(max_entries=3, ttl=3600)
 def load_item_class(item_mtime):
     """제품코드 → '수입' / '자사제조' (품목마스터에 TRA.GOODS 표기가 있으면 수입)"""
     try:
@@ -1666,7 +1686,7 @@ def process_newprod_upload(f, base_year):
     return out[NEWPROD_COLS].reset_index(drop=True), None
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=3, ttl=3600)
 def get_newprod_window(np_mtime):
     """{제품코드: (시작월, 종료월)} — 시작월 = 영업기획 수요계획이 처음 잡힌 달,
        종료월 = 시작월 + (NEWPROD_MONTHS-1)개월. 코드 미정(NEW-) 품목은 제외."""
@@ -1796,7 +1816,7 @@ def month_shift(m, n):
         return None
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=4, ttl=3600)
 def build_sales_base(hist_mtime, act_mtime, item_mtime, exc_mtime, rules_key, keep_trade=False):
     """과거 판매 이력('25.1~'26.3) + 기존 출고실적('26.4~) 을 이어붙인 통합 실적.
        계획 검증 전용이며 정확도 계산에는 쓰이지 않음."""
@@ -4051,10 +4071,14 @@ def render_inventory_tab(item_info, sel_countries):
     p['소진개월'] = np.where(p['월평균판매'] > 0,
                           p['기초재고'] / p['월평균판매'].replace(0, np.nan), np.nan)
 
+    _lo_txt = ' · '.join(f"{k} {v[0]:g}개월 미만" for k, v in INV_COVER_LIMITS.items())
+    _hi_txt = ' · '.join(f"{k} {v[1]:g}개월 초과" for k, v in INV_COVER_LIMITS.items())
+
     f1, f2, f3 = st.columns([1.3, 1, 1])
     with f1:
-        view = st.radio("보기", ['전체', '결품 위험 (1개월 미만)', '과잉 재고 (3개월 초과)'],
-                        horizontal=True, key="inv_view")
+        view = st.radio("보기", ['전체', '결품 위험', '과잉 재고'],
+                        horizontal=True, key="inv_view2",
+                        help=f"결품 위험: {_lo_txt}  /  과잉 재고: {_hi_txt}")
     with f2:
         cls_pick = st.multiselect("구분", sorted(d['구분'].unique()),
                                   default=sorted(d['구분'].unique()), key="inv_cls")
@@ -4064,9 +4088,11 @@ def render_inventory_tab(item_info, sel_countries):
     if cls_pick:
         p = p[p['구분'].isin(cls_pick)]
     if view.startswith('결품'):
-        p = p[p['소진개월'].notna() & (p['소진개월'] < 1)].sort_values(['구분', '소진개월'])
+        _lo = p['구분'].map(lambda c: inv_cover_limits(c)[0])
+        p = p[p['소진개월'].notna() & (p['소진개월'] < _lo)].sort_values(['구분', '소진개월'])
     elif view.startswith('과잉'):
-        p = p[p['소진개월'].notna() & (p['소진개월'] > 3)].sort_values(
+        _hi = p['구분'].map(lambda c: inv_cover_limits(c)[1])
+        p = p[p['소진개월'].notna() & (p['소진개월'] > _hi)].sort_values(
             ['구분', '소진개월'], ascending=[True, False])
     else:
         p = p.sort_values(['구분', '기초재고'], ascending=[True, False])
@@ -4117,9 +4143,10 @@ def render_inventory_tab(item_info, sel_countries):
         v = row['소진개월']
         if pd.isna(v):
             return [''] * len(row)
-        if v < 1:
+        _l, _h = inv_cover_limits(row['구분'])     # 자사제조·수입의 기준이 다르다
+        if v < _l:
             return ['background-color: #fbe9e9'] * len(row)
-        if v > 3:
+        if v > _h:
             return ['background-color: #e8f0fb'] * len(row)
         return [''] * len(row)
 
@@ -4142,7 +4169,8 @@ def render_inventory_tab(item_info, sel_countries):
         st.dataframe(disp.style.format(fmt).apply(hl, axis=1),
                      width='content', hide_index=True, height=h, column_config=cfg)
     st.caption(f"💡 소진 개월 수 = 전국재고 ÷ 최근 {int(avg_n)}개월 평균 판매. "
-               "🔴 1개월 미만은 결품 위험, 🔵 3개월 초과는 과잉 재고. 판매 이력이 없으면 '-'. "
+               f"🔴 결품 위험 = {_lo_txt} / 🔵 과잉 재고 = {_hi_txt} "
+               "(수입품은 조달 리드타임을 감안해 기준을 넓게 잡음). 판매 이력이 없으면 '-'. "
                "LA는 Rancho·DC·Jersey·DC2·DC3·Rancho_plant2의 합계이며, TRANSFER는 창고 간 이동 중 물량입니다. "
                "🖱️ **표에서 품목 행을 클릭하면 바로 아래에 판매 추이 그래프가 나타납니다.**")
 
@@ -4383,7 +4411,7 @@ if IS_ADMIN:
     masters_ready = all(os.path.exists(p) for p in [master_path, item_master_path, exclusion_path])
 
     # 🎯 [성능] 업로드 파일 파싱 결과 캐시: 같은 파일이면 최초 1회만 엑셀을 해석.
-    @st.cache_data(show_spinner=False)
+    @st.cache_data(show_spinner=False, max_entries=4, ttl=1800)
     def _cached_parse(kind, file_bytes, file_name, master_mtime):
         bio = io.BytesIO(file_bytes)
         master_lookup = load_master_lookup(master_mtime)
@@ -4871,7 +4899,12 @@ if master_ready and item_master_ready and exclusion_ready:
                               period_rules_key(), file_mtime(master_path),
                               file_mtime(NEWPROD_STORE))
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+    # 🎯 [성능] st.tabs 는 9개 탭을 '전부' 실행한 뒤 보이지 않는 탭을 CSS로 숨긴다.
+    #    → 체크박스 하나만 눌러도 보지도 않는 8개 탭의 표·차트까지 다시 그려 수 초가 걸렸다.
+    #    선택한 탭 하나만 그리도록 바꿔 화면 갱신당 계산량을 1/9 수준으로 줄인다.
+    #    ※ 원래 탭으로 되돌리려면 이 블록을 st.tabs([...]) 로 바꾸고
+    #      아래 'if _TAB == n:' 들을 'with tabn:' 으로 되돌리면 된다.
+    TAB_LABELS = [
         "📊 1. 제품별 실적 뷰",
         "🏢 2. 영업조직별 실적 뷰",
         "🛠️ 3. 상세 분석 (조직/사원별 딥다이브)",
@@ -4881,17 +4914,29 @@ if master_ready and item_master_ready and exclusion_ready:
         "🔮 7. 미래 계획 검증",
         "🆕 8. 신제품 현황",
         "📦 9. 재고 현황"
-    ])
+    ]
+    if hasattr(st, 'segmented_control'):
+        _pick = st.segmented_control("보기", TAB_LABELS, default=TAB_LABELS[0],
+                                     key="main_tab", label_visibility="collapsed")
+        if _pick is None:          # 선택된 항목을 다시 누르면 해제되므로 직전 선택을 유지
+            st.session_state["main_tab"] = st.session_state.get("_tab_last", TAB_LABELS[0])
+            st.rerun()
+    else:
+        _pick = st.radio("보기", TAB_LABELS, horizontal=True,
+                         key="main_tab", label_visibility="collapsed")
+    st.session_state["_tab_last"] = _pick
+    _TAB = TAB_LABELS.index(_pick) + 1
+    st.markdown("---")
 
     sel_countries = None
     if raw_df is None or raw_df.empty:
-        with tab1:
+        if _TAB == 1:
             st.info("좌측 📚 영역에서 계획/실적 데이터를 히스토리에 반영해주세요. 한 번 반영하면 재업로드 없이 계속 표시됩니다.")
-        with tab2:
+        if _TAB == 2:
             st.info("히스토리 데이터가 없습니다.")
-        with tab3:
+        if _TAB == 3:
             st.info("히스토리 데이터가 없습니다.")
-        with tab4:
+        if _TAB == 4:
             st.info("히스토리 데이터가 없습니다.")
     else:
         st.subheader("🔍 통합 데이터 필터")
@@ -4927,7 +4972,7 @@ if master_ready and item_master_ready and exclusion_ready:
             (~raw_df['제품코드'].isin(exclude_codes))
         ]
 
-        with tab1:
+        if _TAB == 1:
             st.markdown("##### 📈 월별 계획·실적(Bar) + 정확도(Line) 트렌드")
             create_combo_chart(filtered_df, selected_months, chart_key='combo_tab1')
             st.markdown("##### 품목별 수요계획 대비 판매실적")
@@ -4936,26 +4981,40 @@ if master_ready and item_master_ready and exclusion_ready:
         # 🎯 신제품(영업기획 계획 적용 품목)은 조직 축 평가에서 제외
         #    계획 주체(영업기획)와 실적 주체(지점·사원)가 달라 정확도가 왜곡되기 때문.
         _np_win = get_newprod_window(file_mtime(NEWPROD_STORE))
+        _np_start = {c: w[0] for c, w in (_np_win or {}).items()}
+        _np_end = {c: w[1] for c, w in (_np_win or {}).items()}
+
+        def newprod_mask(d):
+            """신제품 정책 적용 대상 행 마스크.
+               is_newprod_active 를 행마다 호출하던 것을 벡터 연산으로 대체 — 수십 배 빠르다."""
+            if not _np_win or d is None or d.empty:
+                return pd.Series(False, index=(d.index if d is not None else pd.Index([])))
+            c = d['제품코드'].astype(str)
+            m = d['기준월'].astype(str)
+            s = c.map(_np_start).fillna('￿')   # 신제품 목록에 없는 코드 → 항상 False
+            e = c.map(_np_end).fillna('')
+            return (m != '') & (m >= NEWPROD_APPLY_FROM) & (m >= s) & (m <= e)
+
         def drop_newprod(d):
             if not _np_win or d is None or d.empty:
                 return d
-            mask = d.apply(lambda r: is_newprod_active(r['제품코드'], r['기준월'], _np_win), axis=1)
-            return d[~mask]
+            return d[~newprod_mask(d)]
 
-        org_df = drop_newprod(filtered_df)
-        _np_cnt = 0
-        if _np_win and not filtered_df.empty:
-            _np_cnt = filtered_df.apply(
-                lambda r: is_newprod_active(r['제품코드'], r['기준월'], _np_win), axis=1).sum()
+        # org_df·_np_cnt 는 탭2·3에서만 쓰므로 그 탭을 볼 때만 계산 (전체 행 스캔 회피)
+        if _TAB in (2, 3):
+            _np_m = newprod_mask(filtered_df)
+            org_df, _np_cnt = filtered_df[~_np_m], int(_np_m.sum())
+        else:
+            org_df, _np_cnt = filtered_df, 0
 
-        with tab2:
+        if _TAB == 2:
             st.markdown("##### 지점별 수요계획 대비 판매실적")
             st.caption("💡 정확도 = 각 지점이 담당한 품목별 정확도의 평균 (GAP은 총 계획량 - 총 실적량 기준)"
                        + (f" / ※ 신제품은 영업기획이 계획을 수립하므로 조직별 평가에서 제외됨"
                           f" ({NEWPROD_APPLY_FROM}부터 적용, 탭8에서 확인)" if _np_cnt else ""))
             create_styled_pivot(org_df, ['영업부명', '영업지점명'], selected_months, acc_mode='item_avg')
 
-        with tab3:
+        if _TAB == 3:
             st.markdown("##### 영업부/지점/사원을 좁혀가며, 이슈를 딥다이브.")
             t3_base = filtered_df[
                 (~filtered_df['영업부명'].astype(str).str.strip().isin(EVAL_EXCLUDE_ORGS)) &
@@ -5031,7 +5090,7 @@ if master_ready and item_master_ready and exclusion_ready:
             render_detail_table(t3_filtered, ['제품코드', '제품명', '영업지점명', '영업사원명'],
                                 selected_months, sort_month=sort_month, popup_df=t3_all)
 
-        with tab4:
+        if _TAB == 4:
             st.markdown("##### 전월 대비 정확도/GAP 개선 (영업사원별)")
             imp_base = raw_df[
                 (raw_df['국가'].isin(sel_countries)) &
@@ -5044,15 +5103,15 @@ if master_ready and item_master_ready and exclusion_ready:
                 st.caption(f"※ 평가 제외 조직: {', '.join(EVAL_EXCLUDE_ORGS)}")
             render_improvement_tab(imp_base, available_months)
 
-    with tab5:
+    if _TAB == 5:
         st.markdown("##### 당월 판매 진척도 점검 (주차별 중간 점검)")
         render_progress_tab()
 
-    with tab6:
+    if _TAB == 6:
         st.markdown("##### 월 영업목표 대비 실적 현황 (금액 기준)")
         render_goal_tab()
 
-    with tab7:
+    if _TAB == 7:
         st.markdown("##### 미래 수요계획 정합성 검증 (과거 판매 대비)")
         _plan_all = apply_newprod_plan(load_store(PLAN_STORE, PLAN_COLS, '계획수량'),
                                        file_mtime(NEWPROD_STORE))
@@ -5071,11 +5130,11 @@ if master_ready and item_master_ready and exclusion_ready:
             _countries = list(sel_countries)
         render_future_tab(_plan_all, _item_info, _countries)
 
-    with tab8:
+    if _TAB == 8:
         st.markdown("##### 신제품 계획 대비 현황 (수요계획 · 공급 · 출고 · 재고)")
         render_newproduct_tab()
 
-    with tab9:
+    if _TAB == 9:
         st.markdown("##### 재고 현황 (창고별 · 품목별 · 소진 개월 수)")
         try:
             _ii2, _ = load_item_info_and_dropcodes(file_mtime(item_master_path),
