@@ -79,6 +79,10 @@ for _d in [DATA_DIR, HIST_DIR]:
         os.makedirs(_d)
 
 PLAN_STORE = os.path.join(HIST_DIR, "plan_history.csv")
+# 🎯 [수요계획 버전 보존] plan_history.csv 는 '항상 최신'만 담는다(화면이 쓰는 원본, 구조 불변).
+#    아래 아카이브는 덮어쓰기 전 상태를 지우지 않고 제출 건마다 append 만 하는 별도 파일이다.
+#    → 읽기 경로를 하나도 건드리지 않으므로 기존 화면 동작에 영향이 없다.
+PLANVER_STORE = os.path.join(HIST_DIR, "plan_versions.csv")
 ACT_STORE = os.path.join(HIST_DIR, "actual_history.csv")
 PROG_STORE = os.path.join(HIST_DIR, "progress_orders.csv")
 
@@ -689,14 +693,101 @@ def load_store(path, columns, qty_col):
 def save_store(df, path):
     df.to_csv(path, index=False, encoding='utf-8-sig')
 
+# =============================================================
+# 🎯 [수요계획 버전 아카이브]
+#   (소스, 기준월)마다 제출 차수를 1부터 매긴다. 같은 달을 다시 올리면 2차·3차로 쌓인다.
+#   구분: '제출'(수요계획 업로드) / '조정'(영업기획 조정계획) — 누가 손댔는지 구분된다.
+#   화면은 계속 plan_history.csv(최신)만 읽는다. 이 파일은 버전 비교용으로만 쓴다.
+# =============================================================
+PLANVER_COLS = (['버전', '제출일시', '제출월', '구분', '기준월', '소스']
+                + GROUP_COLS + ['계획수량'])
+
+
+def load_plan_versions():
+    if not os.path.exists(PLANVER_STORE):
+        return pd.DataFrame(columns=PLANVER_COLS)
+    try:
+        d = pd.read_csv(PLANVER_STORE, dtype=str, encoding='utf-8-sig')
+    except Exception:
+        return pd.DataFrame(columns=PLANVER_COLS)
+    for c in PLANVER_COLS:
+        if c not in d.columns:
+            d[c] = ''
+    d['계획수량'] = pd.to_numeric(d['계획수량'], errors='coerce').fillna(0.0)
+    d['버전'] = pd.to_numeric(d['버전'], errors='coerce').fillna(0).astype(int)
+    for c in PLANVER_COLS:
+        if c not in ('계획수량', '버전'):
+            d[c] = d[c].fillna('').astype(str)
+    return d[PLANVER_COLS]
+
+
+def planver_bootstrap(cur_store):
+    """버전 관리 도입 전부터 저장돼 있던 계획을 '1차(기존분)'로 먼저 확정한다.
+       ※ 반드시 덮어쓰기(save_store) 전에 호출해야 '이전 값'이 보존된다."""
+    try:
+        if cur_store is None or cur_store.empty:
+            return
+        if os.path.exists(PLANVER_STORE) and not load_plan_versions().empty:
+            return                       # 이미 아카이브가 있으면 아무것도 하지 않음
+        try:
+            ts = datetime.fromtimestamp(file_mtime(PLAN_STORE))
+        except Exception:
+            ts = datetime.now()
+        seed = cur_store.copy()
+        seed['버전'] = 1
+        seed['제출일시'] = ts.strftime('%Y-%m-%d %H:%M')
+        seed['제출월'] = ts.strftime('%Y-%m')
+        seed['구분'] = '기존분'
+        seed[PLANVER_COLS].to_csv(PLANVER_STORE, index=False, encoding='utf-8-sig')
+    except Exception as e:
+        try:
+            st.warning(f"⚠️ 기존 계획의 1차 보존에 실패했습니다: {e}")
+        except Exception:
+            pass
+
+
+def archive_plan_version(rows, kind='제출'):
+    """계획을 저장한 뒤 그 내용을 버전으로 남긴다. 실패해도 본 저장은 그대로 유지된다."""
+    try:
+        if rows is None or rows.empty:
+            return
+        arc = load_plan_versions()
+        now = datetime.now()
+        add = rows.copy()
+        for c in PLAN_COLS:
+            if c not in add.columns:
+                add[c] = '' if c != '계획수량' else 0.0
+        parts = []
+        for (src, mth), g in add.groupby(['소스', '기준월']):
+            prev = arc[(arc['소스'] == str(src)) & (arc['기준월'] == str(mth))]['버전']
+            g = g.copy()
+            g['버전'] = (int(prev.max()) + 1) if len(prev) else 1
+            parts.append(g)
+        if not parts:
+            return
+        add = pd.concat(parts, ignore_index=True)
+        add['제출일시'] = now.strftime('%Y-%m-%d %H:%M')
+        add['제출월'] = now.strftime('%Y-%m')
+        add['구분'] = kind
+        merged = pd.concat([arc, add[PLANVER_COLS]], ignore_index=True)
+        merged.to_csv(PLANVER_STORE, index=False, encoding='utf-8-sig')
+    except Exception as e:
+        try:
+            st.warning(f"⚠️ 계획은 저장됐지만 버전 아카이브 기록에 실패했습니다: {e}")
+        except Exception:
+            pass
+
+
 # 🎯 [핵심] 롤링 업서트: 선택한 월만 삭제 후 교체, 나머지 월은 동결 보존
 def upsert_plan(new_df, months, source):
     store = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
+    planver_bootstrap(store)          # 덮어쓰기 전 현재 계획을 1차로 확정 (최초 1회)
     keep = ~((store['소스'] == source) & (store['기준월'].isin(months)))
     new_df = new_df[new_df['기준월'].isin(months)].copy()
     new_df['소스'] = source
     merged = pd.concat([store[keep], new_df[PLAN_COLS]], ignore_index=True)
     save_store(merged, PLAN_STORE)
+    archive_plan_version(new_df, '제출')      # 덮어쓴 내용을 버전으로 보존
     return []
 
 def upsert_actual(new_df, months):
@@ -731,11 +822,14 @@ def apply_adjustment(adj_file):
     store = load_store(PLAN_STORE, PLAN_COLS, '계획수량')
     if store.empty:
         return None
+    planver_bootstrap(store)          # 조정 전 상태를 1차로 확정 (최초 1회)
     store = pd.merge(store, adj_df, on=['기준월', '제품코드'], how='left')
     store['계획수량'] = np.where(store['조정수량'].notna(), pd.to_numeric(store['조정수량'], errors='coerce'), store['계획수량'])
     affected = sorted(store[store['조정수량'].notna()]['기준월'].unique())
     store = store.drop(columns=['조정수량'])
     save_store(store[PLAN_COLS], PLAN_STORE)
+    if affected:
+        archive_plan_version(store[store['기준월'].isin(affected)][PLAN_COLS], '조정')
     return affected
 
 
@@ -1767,6 +1861,7 @@ FUTC_COL_WIDTH = {
     '영업지점명': 110,
     '영업사원명': 105,
     '상태': 98,
+    '수정 여부': 92,
     '_값': 90,       # 계획 / 전년 동월 / 3·6·12개월 평균 / 가중 GAP 공통
     '배수': 67,
 }
@@ -1929,6 +2024,73 @@ def merge_codes_for_target(sales, target_month):
         gcols = [c for c in ['기준월', '거래처 코드', '제품코드'] if c in out.columns]
         out = out.groupby(gcols, as_index=False)['실적수량'].sum()
     return out
+
+
+def plan_version_dates(target_month):
+    """대상월에 제출 이력이 있는 날짜(제출일시) 목록 — 최신 순.
+       USMX·CAN 은 따로 올리므로 날짜가 버전의 공통 기준점이 된다."""
+    try:
+        arc = load_plan_versions()
+    except Exception:
+        return []
+    if arc.empty:
+        return []
+    a = arc[arc['기준월'].astype(str) == str(target_month)]
+    if a.empty:
+        return []
+    return sorted({d for d in a['제출일시'].astype(str) if d.strip()}, reverse=True)
+
+
+def plan_snapshot_asof(target_month, asof, keys=('제품코드',)):
+    """'그 날짜 시점'의 계획 스냅샷. 소스별로 asof 이하의 가장 최근 차수를 골라 합친다.
+       (USMX 는 10/19, CAN 은 10/12 에 올렸다면 10/19 시점 = USMX 10/19 + CAN 10/12)"""
+    try:
+        arc = load_plan_versions()
+    except Exception:
+        return None
+    if arc.empty or not asof:
+        return None
+    a = arc[(arc['기준월'].astype(str) == str(target_month))
+            & (arc['제출일시'].astype(str) <= str(asof))]
+    if a.empty:
+        return None
+    parts = []
+    for _src, g in a.groupby('소스'):
+        parts.append(g[g['버전'] == g['버전'].max()])
+    snap = pd.concat(parts, ignore_index=True)
+    snap['제품코드'] = snap['제품코드'].astype(str).replace(PRODUCT_MAPPING)
+    return (snap.groupby(list(keys), as_index=False)['계획수량'].sum()
+                .rename(columns={'계획수량': '직전 계획'}))
+
+
+def plan_verdict(chg, before, after):
+    """바꿨는가 / 바꿔서 가중 기준에 가까워졌는가"""
+    if pd.isna(chg):
+        return '신규'
+    if abs(chg) < 1:
+        return '⏸ 미수정'
+    if pd.isna(before) or pd.isna(after):
+        return '✏️ 수정'
+    if after < before - 1:
+        return '✅ 개선'
+    if after > before + 1:
+        return '❌ 악화'
+    return '✏️ 수정'
+
+
+def attach_plan_compare(df, target_month, asof, keys=('제품코드',)):
+    """df 에 '직전 계획 · 증감 · 수정 여부' 3칸을 붙인다. 비교본이 없으면 (df, False)."""
+    prev = plan_snapshot_asof(target_month, asof, keys=keys)
+    if prev is None or prev.empty:
+        return df, False
+    out = df.merge(prev, on=list(keys), how='left')
+    out['직전 계획'] = pd.to_numeric(out['직전 계획'], errors='coerce')
+    out['증감'] = out['계획'] - out['직전 계획']
+    _base = pd.to_numeric(out['가중 기준'], errors='coerce').fillna(0.0)
+    _b = (out['직전 계획'] - _base).abs()
+    _a = (out['계획'] - _base).abs()
+    out['수정 여부'] = [plan_verdict(c, b, a) for c, b, a in zip(out['증감'], _b, _a)]
+    return out, True
 
 
 def build_future_table(plan_df, sales, target_month, keys=('제품코드',), anchor_month=None):
@@ -2129,21 +2291,53 @@ def render_future_tab(plan_df, item_info, sel_countries):
     if t.empty:
         return st.info("조건에 해당하는 품목이 없습니다. (소량 품목 기준을 낮춰보세요)")
 
+    # 🎯 [버전 비교] 어느 날짜의 제출본과 비교할지 고른다. 날짜가 2개 이상일 때만 나타난다.
+    _vdates = plan_version_dates(month_pick)
+    _asof = None
+    if len(_vdates) >= 2:
+        _opts = _vdates[1:]                       # 최신분 자신은 비교 대상에서 제외
+        _asof = st.selectbox("🔁 비교할 제출본 (날짜)", _opts, index=0, key="fut_cmp_asof",
+                             help="이 날짜 시점의 계획과 현재 계획을 비교합니다. "
+                                  "USMX·CAN 은 따로 올리므로, 각 소스의 '그 날짜 이전 최신분'을 씁니다.")
+    st.session_state['_fut_cmp_asof'] = _asof     # 팝업에서도 같은 기준을 쓰도록 공유
+    t, _has_prev = attach_plan_compare(t, month_pick, _asof, keys=('제품코드',))
+
     t['_abs'] = t['가중 GAP'].abs()
     t = t.sort_values('_abs', ascending=False)
     show_cols = ['제품코드', '제품명', '계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균',
                  '가중 기준', '가중 GAP', '배수']
+    _prevlab = f"{str(_asof)[:10]} 계획" if _asof else '직전 계획'
+    if _has_prev:
+        t = t.rename(columns={'직전 계획': _prevlab})
+        show_cols = show_cols[:3] + [_prevlab, '증감', '수정 여부'] + show_cols[3:]
     disp = t[show_cols].reset_index(drop=True)
 
     fmt = {c: _fmt_qty for c in ['계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균', '가중 기준']}
     fmt['가중 GAP'] = _fmt_gap
     fmt['배수'] = _fmt_mult
+    if _has_prev:
+        fmt[_prevlab] = _fmt_qty
+        fmt['증감'] = _fmt_gap          # +/- 부호를 그대로 보여준다
+        st.caption(f"🔁 **{_asof} 제출본 대비**: `증감` = 현재 계획 − 그때 계획, "
+                   "`수정 여부`는 ⏸ 미수정 / ✅ 개선(가중 기준에 가까워짐) / "
+                   "❌ 악화(멀어짐) / ✏️ 수정 / 신규. "
+                   "**바꾸기로 한 걸 실제로 바꿨는지, 바꿔서 나아졌는지**가 이 두 칸에 나옵니다. "
+                   "🖱️ 행을 클릭하면 거래처별로도 같은 비교가 보입니다.")
 
     def hl(row):
         v = row['가중 GAP']
         if pd.isna(v) or v == 0:
-            return [''] * len(row)
-        return ['background-color: #fbe9e9' if v > 0 else 'background-color: #e8f0fb'] * len(row)
+            base = ''
+        else:
+            base = 'background-color: #fbe9e9' if v > 0 else 'background-color: #e8f0fb'
+        out = [base] * len(row)
+        if _has_prev and '수정 여부' in row.index:        # 판정 칸만 색으로 구분
+            _c = {'✅ 개선': 'background-color: #e3f3e9; font-weight: bold',
+                  '❌ 악화': 'background-color: #fde2e2; font-weight: bold',
+                  '⏸ 미수정': 'background-color: #eeeeee; color: #777777'}.get(row['수정 여부'])
+            if _c:
+                out[list(row.index).index('수정 여부')] = _c
+        return out
 
     h = min(560, 37 * (len(disp) + 1) + 12)
     ev2, sel_ok2 = None, True
@@ -2288,6 +2482,15 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
                   np.where((ct['계획'] > 0) & (ct['가중 기준'] == 0), '🆕 실적 없음', ''))
     ct['_abs'] = ct['가중 GAP'].abs()
 
+    # 🎯 [버전 비교] 상단 표와 같은 기준일의 제출본을 거래처 단위로도 붙인다
+    _asof = st.session_state.get('_fut_cmp_asof')
+    ct, _has_prev = attach_plan_compare(ct, month_pick, _asof,
+                                        keys=('제품코드', '거래처 코드'))
+    _prevlab = f"{str(_asof)[:10]} 계획" if _asof else '직전 계획'
+    if _has_prev:
+        ct = ct.rename(columns={'직전 계획': _prevlab})
+        st.caption(f"🔁 **{_asof} 제출본 대비** — 어느 거래처의 수량이 움직였는지 `증감` 칸으로 확인하세요.")
+
     # --- 상단 차트: 품목 전체 ↔ 선택 거래처 ---
     cust_pick = st.session_state.get('fut_cust_pick')
     cust_valid = cust_pick if (cust_pick in set(ct['거래처 코드'])) else None
@@ -2315,6 +2518,10 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
                              horizontal=True, key=f"futc_sort_{code}")
 
     vcols = ['계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균', '가중 기준', '가중 GAP', '배수']
+    if _has_prev:
+        vcols = ['계획', _prevlab, '증감'] + vcols[1:]
+    lcols = ['거래처 코드', '거래처명', '영업지점명', '영업사원명', '상태'] + (['수정 여부'] if _has_prev else [])
+    _sumcols = [c for c in vcols if c != '배수']
 
     def sort_key(d):
         if sort_mode == '과다(+) 큰 순':
@@ -2325,13 +2532,11 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
 
     if grp_mode == '묶지 않음':
         d = sort_key(ct)
-        rows = [[r['거래처 코드'], r['거래처명'], r['영업지점명'], r['영업사원명'], r['상태']]
-                + [r[c] for c in vcols] for _, r in d.iterrows()]
+        rows = [[r[c] for c in lcols] + [r[c] for c in vcols] for _, r in d.iterrows()]
         sub_pos = []
     else:
         gcol = '거래처그룹' if grp_mode == '거래처 그룹' else '영업사원명'
-        g = ct.groupby(gcol)[['계획', '전년 동월', '3개월 평균', '6개월 평균', '12개월 평균',
-                              '가중 기준', '가중 GAP']].sum().reset_index()
+        g = ct.groupby(gcol)[_sumcols].sum().reset_index()
         g['배수'] = np.where(g['가중 기준'] > 0, g['계획'] / g['가중 기준'].replace(0, np.nan), np.nan)
         g['_abs'] = g['가중 GAP'].abs()
         g = sort_key(g)
@@ -2340,13 +2545,13 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
         for _, grow in g.iterrows():
             blk = sort_key(ct[ct[gcol] == grow[gcol]])
             for _, r in blk.iterrows():
-                rows.append([r['거래처 코드'], r['거래처명'], r['영업지점명'], r['영업사원명'], r['상태']]
-                            + [r[c] for c in vcols])
+                rows.append([r[c] for c in lcols] + [r[c] for c in vcols])
             if len(blk) > 1 or grp_mode == '거래처 그룹':
-                rows.append(['', f"📍 {grow[gcol]} 소계", '', '', ''] + [grow[c] for c in vcols])
+                rows.append(['', f"📍 {grow[gcol]} 소계"] + [''] * (len(lcols) - 2)
+                            + [grow[c] for c in vcols])
                 sub_pos.append(len(rows) - 1)
 
-    ccols = ['거래처 코드', '거래처명', '영업지점명', '영업사원명', '상태'] + vcols
+    ccols = lcols + vcols
     cdisp = pd.DataFrame(rows, columns=ccols)
     if not SHOW_CUSTOMER_CODE:
         cdisp = cdisp.drop(columns=['거래처 코드'])   # 가로 폭 절약 (설정으로 다시 켤 수 있음)
@@ -2366,8 +2571,9 @@ def render_future_customer(plan_df, sales, month_pick, anchor_month, code, pname
         if SHOW_CUSTOMER_CODE:
             cfg2['거래처 코드'] = st.column_config.Column(width=FUTC_COL_WIDTH['거래처 코드'], pinned=True)
         cfg2['거래처명'] = st.column_config.Column(width=FUTC_COL_WIDTH['거래처명'], pinned=True)
-        for _c in ['영업지점명', '영업사원명', '상태']:
-            cfg2[_c] = st.column_config.Column(width=FUTC_COL_WIDTH[_c])
+        for _c in ['영업지점명', '영업사원명', '상태'] + (['수정 여부'] if _has_prev else []):
+            if _c in cdisp.columns:
+                cfg2[_c] = st.column_config.Column(width=FUTC_COL_WIDTH.get(_c, 95))
         for _c in vcols:
             if _c in FUTC_HIDE_COLS:
                 continue
@@ -4832,6 +5038,25 @@ if IS_ADMIN:
                 if os.path.exists(p):
                     os.remove(p)
             st.rerun()
+
+# --- 수요계획 버전 보관 현황 ---
+with st.sidebar.expander("🗂️ 수요계획 버전 보관 현황"):
+    try:
+        _pv = load_plan_versions()
+        if _pv.empty:
+            st.caption("아직 보관된 버전이 없습니다. 다음 수요계획 업로드부터 쌓입니다. "
+                       "(첫 업로드 시 지금 저장돼 있는 계획이 '1차'로 함께 보존됩니다)")
+        else:
+            _g = (_pv.groupby(['소스', '기준월'])
+                     .agg(차수=('버전', 'max'), 최근제출=('제출일시', 'max'))
+                     .reset_index().sort_values(['소스', '기준월']))
+            st.caption(f"총 {len(_pv):,}행 · {_g['차수'].max()}차까지 보관 중 "
+                       f"(plan_versions.csv)")
+            st.dataframe(_g, hide_index=True, use_container_width=True, height=240)
+            st.caption("💡 화면은 항상 최신 계획을 씁니다. 이 파일은 버전 비교 전용이라 "
+                       "지금 보시는 수치에는 영향이 없습니다.")
+    except Exception as _e:
+        st.caption(f"읽기 실패: {_e}")
 
 # --- 제외 규칙 확인 (진단) ---
 with st.sidebar.expander("🔍 제외 규칙 확인"):
